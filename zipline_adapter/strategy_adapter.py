@@ -254,7 +254,14 @@ class ZiplineStrategyAdapter:
 
         peak = np.maximum.accumulate(equity)
         dd = (np.array(equity) - peak) / peak
-        max_dd = float(np.abs(np.min(dd))) if len(dd) > 0 else 0
+        # Signed, not absolute. np.min(dd) is already negative, and every other
+        # adapter reports it that way — backtrader_adapter/analyzers.py:126 and
+        # portfolio_backtester/portfolio_engine.py:166 both use float(np.min(dd)).
+        # Wrapping it in np.abs() made this adapter the only one returning a
+        # positive drawdown, so the same BacktestResultV2 field carried opposite
+        # signs depending on which engine produced it, and any downstream
+        # threshold comparison or chart label was inverted for zipline runs.
+        max_dd = float(np.min(dd)) if len(dd) > 0 else 0
 
         n_trades = 0
         if "transactions" in perf.columns:

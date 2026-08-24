@@ -614,15 +614,48 @@ class RiskManager:
 
     # ─── Position Tracking ───
 
-    def add_position(self, symbol: str, risk_amount: float) -> None:
-        """Register an open position's risk amount. Thread-safe."""
+    def add_position(self, symbol: str, risk_amount: float) -> bool:
+        """Register an open position's risk amount. Thread-safe.
+
+        Enforces max_open_positions inside the lock and returns whether the
+        slot was granted.
+
+        can_trade() already refuses once the limit is reached, but checking it
+        and then calling this method is two operations: concurrent callers can
+        all observe can_trade() as True before any of them adds a position. A
+        test doing exactly that opened 15 positions against a limit of 10:
+
+            AssertionError: Accepted 15 positions, max is 10
+
+        Both methods were individually thread-safe, which is not the same as
+        the pair being atomic. Enforcing the ceiling here makes the limit hold
+        regardless of how a caller sequences its checks.
+
+        Args:
+            symbol: Ticker symbol. Re-registering an existing symbol updates
+                its risk amount and never consumes a new slot.
+            risk_amount: Dollar risk carried by the position.
+
+        Returns:
+            True if the position was recorded; False if the account is already
+            at max_open_positions and this symbol is not among them.
+        """
         with self._state_lock:
+            is_new = symbol not in self._open_positions
+            if is_new and len(self._open_positions) >= self.config.max_open_positions:
+                logger.warning(
+                    "Position rejected: %s — already at max_open_positions (%d)",
+                    symbol, self.config.max_open_positions,
+                )
+                return False
+
             self._open_positions[symbol] = risk_amount
             logger.info(
                 "Position added: %s risk=$%.2f | Total positions: %d",
                 symbol, risk_amount, len(self._open_positions),
             )
         self._save_state()
+        return True
 
     def remove_position(self, symbol: str) -> None:
         """Remove a closed position from tracking. Thread-safe."""
@@ -776,9 +809,15 @@ class RiskManager:
         if not self.can_trade():
             return False, "Risk gates blocked (can_trade=False)"
 
+        # The notional is pre-formatted rather than passed as %,.0f: the comma
+        # flag is a str.format feature and is not valid in %-style formatting,
+        # so logging raised ValueError("unsupported format character ','")
+        # every time an order passed validation and a handler formatted the
+        # record. With no formatting handler attached the record is never
+        # rendered, which is why this stayed hidden.
         logger.info(
-            "Order validated: %s %s %d shares @ $%.2f (notional=$%,.0f)",
-            direction, symbol, shares, price, notional,
+            "Order validated: %s %s %d shares @ $%.2f (notional=$%s)",
+            direction, symbol, shares, price, f"{notional:,.0f}",
         )
         return True, "OK"
 

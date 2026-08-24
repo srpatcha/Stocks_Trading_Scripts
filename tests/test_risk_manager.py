@@ -119,13 +119,28 @@ class TestRiskManagerInit:
 
 
 class TestPositionSizing:
-    """Tests for calculate_position_size with different methods."""
+    """Tests for calculate_position_size with different methods.
+
+    calculate_position_size() applies _apply_position_caps() to every method,
+    and max_position_pct_equity defaults to 25%. With $100k of equity at $150 a
+    share that ceiling is 166 shares, which is below every raw size exercised
+    here, so these cases previously asserted the uncapped arithmetic and failed
+    against a correctly-capped implementation:
+
+        assert size == 400
+        E  assert 166 == 400
+
+    The cap is a deliberate risk control, not a bug, so these tests lift it to
+    100% to isolate the sizing arithmetic they exist to check. TestPositionCaps
+    below covers the capping behaviour itself, which nothing tested before.
+    """
 
     def test_fixed_fractional_with_stop(self):
         rm = RiskManager(config=RiskManagerConfig(
             sizing_method=SizingMethod.FIXED_FRACTIONAL,
             risk_per_trade_pct=2.0,
             total_capital=100000.0,
+            max_position_pct_equity=100.0,
         ))
         # Risk $2000, stop $5 away → 400 shares
         size = rm.calculate_position_size("AAPL", 150.0, stop_price=145.0)
@@ -135,6 +150,7 @@ class TestPositionSizing:
         rm = RiskManager(config=RiskManagerConfig(
             risk_per_trade_pct=2.0,
             total_capital=100000.0,
+            max_position_pct_equity=100.0,
         ))
         # Risk $2000, ATR=2.5 → risk_per_share=5.0 → 400 shares
         size = rm.calculate_position_size("AAPL", 150.0, atr=2.5)
@@ -144,6 +160,7 @@ class TestPositionSizing:
         rm = RiskManager(config=RiskManagerConfig(
             risk_per_trade_pct=2.0,
             total_capital=100000.0,
+            max_position_pct_equity=100.0,
         ))
         # No stop or ATR → default 2% of price → risk_per_share=3.0 → 666 shares
         size = rm.calculate_position_size("AAPL", 150.0)
@@ -153,9 +170,60 @@ class TestPositionSizing:
         rm = RiskManager(config=RiskManagerConfig(
             sizing_method=SizingMethod.FIXED_SHARES,
             fixed_shares=200,
+            max_position_pct_equity=100.0,
         ))
         size = rm.calculate_position_size("AAPL", 150.0)
         assert size == 200
+
+
+class TestPositionCaps:
+    """The safety caps _apply_position_caps() enforces on every sizing method.
+
+    These are the controls that stop a sizing formula from putting the whole
+    account into one name. None of them had a test.
+    """
+
+    def test_equity_pct_cap_binds(self):
+        # Raw fixed-fractional size is 400; 25% of $100k at $150 is 166.
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_FRACTIONAL,
+            risk_per_trade_pct=2.0,
+            total_capital=100000.0,
+            max_position_pct_equity=25.0,
+        ))
+        assert rm.calculate_position_size("AAPL", 150.0, stop_price=145.0) == 166
+
+    def test_notional_cap_binds(self):
+        # $15k notional at $150 is 100 shares, tighter than the 25% equity cap.
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_FRACTIONAL,
+            risk_per_trade_pct=2.0,
+            total_capital=100000.0,
+            max_position_pct_equity=100.0,
+            max_position_notional=15000.0,
+        ))
+        assert rm.calculate_position_size("AAPL", 150.0, stop_price=145.0) == 100
+
+    def test_fat_finger_cap_binds(self):
+        # A fixed-shares request far above max_shares_per_order is clamped.
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_SHARES,
+            fixed_shares=1_000_000,
+            total_capital=100_000_000.0,
+            max_position_pct_equity=100.0,
+            max_shares_per_order=10000,
+        ))
+        assert rm.calculate_position_size("AAPL", 150.0) == 10000
+
+    def test_caps_never_return_zero_for_a_valid_request(self):
+        # A tiny account must still produce a tradeable size, not 0.
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_FRACTIONAL,
+            risk_per_trade_pct=2.0,
+            total_capital=100.0,
+            max_position_pct_equity=25.0,
+        ))
+        assert rm.calculate_position_size("AAPL", 150.0, stop_price=145.0) >= 1
 
     def test_fixed_dollar_method(self):
         rm = RiskManager(config=RiskManagerConfig(
