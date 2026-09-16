@@ -1,0 +1,154 @@
+import { UserService } from '@ghostfolio/client/services/user/user.service';
+import { User } from '@ghostfolio/common/interfaces';
+import { hasPermission, permissions } from '@ghostfolio/common/permissions';
+import { publicRoutes } from '@ghostfolio/common/routes/routes';
+import { translate } from '@ghostfolio/ui/i18n';
+import { NotificationService } from '@ghostfolio/ui/notifications';
+import { GfPremiumIndicatorComponent } from '@ghostfolio/ui/premium-indicator';
+import { DataService } from '@ghostfolio/ui/services';
+
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  CUSTOM_ELEMENTS_SCHEMA,
+  DestroyRef,
+  inject,
+  OnInit
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCardModule } from '@angular/material/card';
+import { MatTooltipModule } from '@angular/material/tooltip';
+import { RouterModule } from '@angular/router';
+import { IonIcon } from '@ionic/angular/standalone';
+import { addIcons } from 'ionicons';
+import {
+  checkmarkCircleOutline,
+  checkmarkOutline,
+  informationCircleOutline
+} from 'ionicons/icons';
+import { StringValue } from 'ms';
+import { EMPTY } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'page' },
+  imports: [
+    GfPremiumIndicatorComponent,
+    IonIcon,
+    MatButtonModule,
+    MatCardModule,
+    MatTooltipModule,
+    RouterModule
+  ],
+  schemas: [CUSTOM_ELEMENTS_SCHEMA],
+  selector: 'gf-pricing-page',
+  styleUrls: ['./pricing-page.scss'],
+  templateUrl: './pricing-page.html'
+})
+export class GfPricingPageComponent implements OnInit {
+  protected baseCurrency: string;
+  protected coupon: number | undefined;
+  protected durationExtension: StringValue | undefined;
+  protected hasPermissionToCreateUser: boolean;
+  protected hasPermissionToUpdateUserSettings: boolean;
+
+  protected readonly importAndExportTooltipBasic = translate(
+    'DATA_IMPORT_AND_EXPORT_TOOLTIP_BASIC'
+  );
+
+  protected readonly importAndExportTooltipOSS = translate(
+    'DATA_IMPORT_AND_EXPORT_TOOLTIP_OSS'
+  );
+
+  protected label: string | undefined;
+  protected price: number | undefined;
+
+  protected readonly professionalDataProviderTooltipPremium = translate(
+    'PROFESSIONAL_DATA_PROVIDER_TOOLTIP_PREMIUM'
+  );
+
+  protected readonly routerLinkFeatures = publicRoutes.features.routerLink;
+  protected readonly routerLinkRegister = publicRoutes.register.routerLink;
+  protected user: User;
+
+  private couponId: string | undefined;
+  private priceId: string;
+
+  private readonly changeDetectorRef = inject(ChangeDetectorRef);
+  private readonly dataService = inject(DataService);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly notificationService = inject(NotificationService);
+  private readonly userService = inject(UserService);
+
+  public constructor() {
+    addIcons({
+      checkmarkCircleOutline,
+      checkmarkOutline,
+      informationCircleOutline
+    });
+  }
+
+  public ngOnInit() {
+    const { baseCurrency, globalPermissions, subscriptionOffer } =
+      this.dataService.fetchInfo();
+
+    this.baseCurrency = baseCurrency;
+    this.coupon = subscriptionOffer?.coupon;
+    this.durationExtension = subscriptionOffer?.durationExtension;
+
+    this.hasPermissionToCreateUser = hasPermission(
+      globalPermissions,
+      permissions.createUserAccount
+    );
+
+    this.label = subscriptionOffer?.label;
+    this.price = subscriptionOffer?.price;
+
+    this.userService.stateChanged
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((state) => {
+        if (state?.user) {
+          this.user = state.user;
+
+          this.hasPermissionToUpdateUserSettings = hasPermission(
+            this.user.permissions,
+            permissions.updateUserSettings
+          );
+
+          this.coupon = this.user?.subscription?.offer?.coupon;
+          this.couponId = this.user?.subscription?.offer?.couponId;
+          this.durationExtension =
+            this.user?.subscription?.offer?.durationExtension;
+          this.label = this.user?.subscription?.offer?.label;
+          this.price = this.user?.subscription?.offer?.price;
+          this.priceId = this.user?.subscription?.offer?.priceId;
+        }
+
+        this.changeDetectorRef.markForCheck();
+      });
+  }
+
+  protected onCheckout() {
+    this.dataService
+      .createStripeCheckoutSession({
+        couponId: this.couponId,
+        priceId: this.priceId
+      })
+      .pipe(
+        catchError((error: Error) => {
+          this.notificationService.alert({
+            title: error.message
+          });
+
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe(({ sessionUrl }) => {
+        window.location.href = sessionUrl;
+      });
+  }
+}

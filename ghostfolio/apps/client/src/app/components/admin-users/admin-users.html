@@ -1,0 +1,298 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <div class="overflow-x-auto">
+        <table class="gf-table" mat-table [dataSource]="dataSource">
+          <ng-container matColumnDef="user">
+            <th
+              *matHeaderCellDef
+              class="mat-mdc-header-cell px-1 py-2"
+              mat-header-cell
+            >
+              <ng-container i18n>User</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="mat-mdc-cell px-1 py-2"
+              mat-cell
+            >
+              <div class="align-items-center d-flex text-nowrap">
+                <span
+                  class="d-none d-sm-inline-block text-monospace"
+                  [class.text-line-through]="element.role === 'INACTIVE'"
+                  >{{ element.id }}</span
+                >
+                <span
+                  class="d-inline-block d-sm-none text-monospace"
+                  [class.text-line-through]="element.role === 'INACTIVE'"
+                  >{{ `${(element.id | slice: 0 : 5)}...` }}</span
+                >
+                @if (element.subscription?.expiresAt) {
+                  <gf-premium-indicator
+                    class="ml-1"
+                    i18n-title
+                    title="Expires {{
+                      formatDistanceToNow(element.subscription.expiresAt)
+                    }} ({{
+                      element.subscription.expiresAt | date: defaultDateFormat
+                    }})"
+                    [enableLink]="false"
+                  />
+                }
+              </div>
+            </td>
+          </ng-container>
+
+          @if (hasPermissionForSubscription) {
+            <ng-container matColumnDef="country">
+              <th
+                *matHeaderCellDef
+                class="mat-mdc-header-cell px-1 py-2"
+                mat-header-cell
+              >
+                <ng-container i18n>Country</ng-container>
+              </th>
+              <td
+                *matCellDef="let element"
+                class="mat-mdc-cell px-1 py-2"
+                mat-cell
+              >
+                <span
+                  class="h5"
+                  [title]="getCountryName({ code: element.country })"
+                  >{{ getEmojiFlag(element.country) }}</span
+                >
+              </td>
+            </ng-container>
+          }
+
+          <ng-container matColumnDef="registration">
+            <th
+              *matHeaderCellDef
+              class="mat-mdc-header-cell px-1 py-2"
+              mat-header-cell
+            >
+              <ng-container i18n>Registration</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="mat-mdc-cell px-1 py-2 text-nowrap"
+              mat-cell
+            >
+              {{ formatDistanceToNow(element.createdAt) }}
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="accounts">
+            <th
+              *matHeaderCellDef
+              class="mat-mdc-header-cell px-1 py-2 text-right"
+              mat-header-cell
+            >
+              <ng-container i18n>Accounts</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="mat-mdc-cell px-1 py-2 text-right"
+              mat-cell
+            >
+              <gf-value
+                class="d-inline-block justify-content-end"
+                [locale]="user?.settings?.locale"
+                [value]="element.accountCount"
+              />
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="activities">
+            <th
+              *matHeaderCellDef
+              class="mat-mdc-header-cell px-1 py-2 text-right"
+              mat-header-cell
+            >
+              <ng-container i18n>Activities</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="mat-mdc-cell px-1 py-2 text-right"
+              mat-cell
+            >
+              <gf-value
+                class="d-inline-block justify-content-end"
+                [locale]="user?.settings?.locale"
+                [value]="element.activityCount"
+              />
+            </td>
+          </ng-container>
+
+          @if (hasPermissionForSubscription) {
+            <ng-container matColumnDef="engagementPerDay">
+              <th
+                *matHeaderCellDef
+                class="mat-mdc-header-cell px-1 py-2 text-right"
+                mat-header-cell
+              >
+                <ng-container i18n>Engagement per Day</ng-container>
+              </th>
+              <td
+                *matCellDef="let element"
+                class="mat-mdc-cell px-1 py-2 text-right"
+                mat-cell
+              >
+                <gf-value
+                  class="d-inline-block justify-content-end"
+                  [locale]="user?.settings?.locale"
+                  [precision]="0"
+                  [value]="element.engagement"
+                />
+              </td>
+            </ng-container>
+            <ng-container matColumnDef="dailyApiRequests">
+              <th
+                *matHeaderCellDef
+                class="mat-mdc-header-cell px-1 py-2 text-right"
+                mat-header-cell
+              >
+                <ng-container i18n>API Requests Today</ng-container>
+              </th>
+              <td
+                *matCellDef="let element"
+                class="mat-mdc-cell px-1 py-2 text-right"
+                mat-cell
+              >
+                <gf-value
+                  class="d-inline-block justify-content-end"
+                  [locale]="user?.settings?.locale"
+                  [precision]="0"
+                  [value]="element.dailyApiRequests"
+                />
+              </td>
+            </ng-container>
+          }
+
+          @if (hasPermissionForSubscription) {
+            <ng-container matColumnDef="lastRequest">
+              <th
+                *matHeaderCellDef
+                class="mat-mdc-header-cell px-1 py-2"
+                i18n
+                mat-header-cell
+              >
+                Last Request
+              </th>
+              <td
+                *matCellDef="let element"
+                class="mat-mdc-cell px-1 py-2 text-nowrap"
+                mat-cell
+              >
+                {{ formatDistanceToNow(element.lastActivity) }}
+              </td>
+            </ng-container>
+          }
+
+          <ng-container matColumnDef="actions" stickyEnd>
+            <th
+              *matHeaderCellDef
+              class="mat-mdc-header-cell px-1 py-2 text-right"
+              mat-header-cell
+            ></th>
+            <td
+              *matCellDef="let element"
+              class="mat-mdc-cell px-1 py-2 text-right"
+              mat-cell
+            >
+              <button
+                class="mx-1 no-min-width px-2"
+                mat-button
+                [matMenuTriggerFor]="userMenu"
+                (click)="$event.stopPropagation()"
+              >
+                <ion-icon name="ellipsis-horizontal" />
+              </button>
+              <mat-menu #userMenu="matMenu" xPosition="before">
+                <a
+                  mat-menu-item
+                  [routerLink]="routerLinkAdminControlUsers.concat(element.id)"
+                >
+                  <span class="align-items-center d-flex">
+                    <ion-icon class="mr-2" name="person-outline" />
+                    <span
+                      ><ng-container i18n>View Details</ng-container>...</span
+                    >
+                  </span>
+                </a>
+                @if (hasPermissionToImpersonateAllUsers) {
+                  <button mat-menu-item (click)="onImpersonateUser(element.id)">
+                    <span class="align-items-center d-flex">
+                      <ion-icon class="mr-2" name="contract-outline" />
+                      <span i18n>Impersonate User</span>
+                    </span>
+                  </button>
+                }
+                <button
+                  mat-menu-item
+                  (click)="onGenerateAccessToken(element.id)"
+                >
+                  <span class="align-items-center d-flex">
+                    <ion-icon class="mr-2" name="key-outline" />
+                    <span i18n>Generate Security Token</span>
+                  </span>
+                </button>
+                <hr class="m-0" />
+                <button
+                  mat-menu-item
+                  [disabled]="
+                    !canDeleteUser({
+                      currentUserId: user?.id,
+                      userId: element.id
+                    })
+                  "
+                  (click)="onDeleteUser(element.id)"
+                >
+                  <span class="align-items-center d-flex">
+                    <ion-icon class="mr-2" name="trash-outline" />
+                    <span i18n>Delete</span>
+                  </span>
+                </button>
+              </mat-menu>
+            </td>
+          </ng-container>
+
+          <tr
+            *matHeaderRowDef="displayedColumns"
+            class="mat-mdc-header-row"
+            mat-header-row
+          ></tr>
+          <tr
+            *matRowDef="let row; columns: displayedColumns"
+            class="cursor-pointer mat-mdc-row"
+            mat-row
+            (click)="onOpenUserDetailDialog(row.id)"
+          ></tr>
+        </table>
+      </div>
+
+      <mat-paginator
+        [class.d-none]="
+          (isLoading && totalItems === 0) || totalItems <= pageSize
+        "
+        [hidePageSize]="true"
+        [length]="totalItems"
+        [pageSize]="pageSize"
+        [showFirstLastButtons]="true"
+        (page)="onChangePage($event)"
+      />
+
+      @if (isLoading) {
+        <ngx-skeleton-loader
+          animation="pulse"
+          class="px-4 py-3"
+          [theme]="{
+            height: '1.5rem',
+            width: '100%'
+          }"
+        />
+      }
+    </div>
+  </div>
+</div>

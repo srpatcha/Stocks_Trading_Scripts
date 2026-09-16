@@ -1,0 +1,12 @@
+:host {
+  display: block;
+
+  .gf-table {
+    min-width: 100%;
+
+    .mat-mdc-row,
+    .mat-mdc-header-row {
+      width: 100%;
+    }
+  }
+}

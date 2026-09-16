@@ -1,0 +1,97 @@
+import {
+  DataProviderHistoricalResponse,
+  DataProviderInfo,
+  DataProviderResponse,
+  LookupResponse,
+  MarketDataOfMarketsResponse
+} from '@ghostfolio/common/interfaces';
+import { Granularity } from '@ghostfolio/common/types';
+
+import { DataSource, SymbolProfile } from '@prisma/client';
+
+export interface DataProviderInterface {
+  canHandle(symbol: string): boolean;
+
+  getAssetProfile({
+    symbol
+  }: GetAssetProfileParams): Promise<Partial<SymbolProfile>>;
+
+  getDataProviderInfo(): DataProviderInfo;
+
+  getDividends({
+    from,
+    granularity,
+    requestTimeout,
+    symbol,
+    to
+  }: GetDividendsParams): Promise<{
+    [date: string]: DataProviderHistoricalResponse;
+  }>;
+
+  getHistorical({
+    from,
+    granularity,
+    requestTimeout,
+    symbol,
+    to
+  }: GetHistoricalParams): Promise<{
+    [date: string]: DataProviderHistoricalResponse;
+  }>;
+
+  getMarketDataOfMarkets?({
+    includeHistoricalData,
+    requestTimeout
+  }: GetMarketDataOfMarketsParams): Promise<MarketDataOfMarketsResponse>;
+
+  getMaxNumberOfSymbolsPerRequest?(): number;
+
+  getName(): DataSource;
+
+  getQuotes({
+    requestTimeout,
+    symbols
+  }: GetQuotesParams): Promise<{ [symbol: string]: DataProviderResponse }>;
+
+  getTestSymbol(): string;
+
+  search({ includeIndices, query }: GetSearchParams): Promise<LookupResponse>;
+}
+
+export interface GetAssetProfileParams {
+  requestTimeout?: number;
+  symbol: string;
+}
+
+export interface GetDividendsParams {
+  from: Date;
+  granularity?: Granularity;
+  requestTimeout?: number;
+  symbol: string;
+  to: Date;
+}
+
+export interface GetHistoricalParams {
+  from: Date;
+  granularity?: Granularity;
+  requestTimeout?: number;
+  symbol: string;
+  to: Date;
+}
+
+export interface GetMarketDataOfMarketsParams {
+  includeHistoricalData?: number;
+  requestTimeout?: number;
+}
+
+export interface GetQuotesParams {
+  requestTimeout?: number;
+  symbols: string[];
+  useCache?: boolean;
+}
+
+export interface GetSearchParams {
+  includeIndices?: boolean;
+  query: string;
+  requestTimeout?: number;
+  userId?: string;
+}

@@ -1,0 +1,54 @@
+import {
+  EnhancedAssetProfile,
+  PortfolioDetails,
+  PortfolioPosition
+} from '@ghostfolio/common/interfaces';
+import { Market } from '@ghostfolio/common/types';
+
+import { Order } from '@prisma/client';
+
+export interface PublicPortfolioResponse extends PublicPortfolioResponseV1 {
+  alias?: string;
+  hasDetails: boolean;
+  holdings: Pick<
+    PortfolioPosition,
+    | 'allocationInPercentage'
+    | 'assetProfile'
+    | 'dateOfFirstActivity'
+    | 'markets'
+    | 'netPerformancePercentWithCurrencyEffect'
+    | 'valueInPercentage'
+  >[];
+  latestActivities: (Pick<
+    Order,
+    'currency' | 'date' | 'fee' | 'quantity' | 'type' | 'unitPrice'
+  > & {
+    assetProfile: Pick<
+      EnhancedAssetProfile,
+      'currency' | 'dataSource' | 'name' | 'symbol'
+    >;
+    value: number;
+    valueInBaseCurrency: number;
+  })[];
+  markets: {
+    [key in Market]: Pick<
+      NonNullable<PortfolioDetails['markets']>[key],
+      'id' | 'valueInPercentage'
+    >;
+  };
+}
+
+interface PublicPortfolioResponseV1 {
+  createdAt: Date;
+  performance: {
+    '1d': {
+      relativeChange: number;
+    };
+    max: {
+      relativeChange: number;
+    };
+    ytd: {
+      relativeChange: number;
+    };
+  };
+}

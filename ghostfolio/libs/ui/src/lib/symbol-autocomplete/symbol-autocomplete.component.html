@@ -1,0 +1,53 @@
+<input
+  autocapitalize="off"
+  autocomplete="off"
+  matInput
+  [formControl]="control"
+  [matAutocomplete]="symbolAutocomplete"
+  [maxlength]="SEARCH_QUERY_MAXIMUM_LENGTH"
+/>
+
+<mat-autocomplete
+  #symbolAutocomplete="matAutocomplete"
+  [displayWith]="displayFn"
+  (optionSelected)="onUpdateSymbol($event)"
+>
+  @if (!isLoading) {
+    @for (lookupItem of lookupItems; track lookupItem) {
+      <mat-option
+        class="line-height-1"
+        [disabled]="lookupItem.dataProviderInfo.isPremium"
+        [value]="lookupItem"
+      >
+        <span class="align-items-center d-flex line-height-1"
+          ><span>{{ lookupItem.name }}</span>
+          @if (lookupItem.dataProviderInfo.isPremium) {
+            <gf-premium-indicator class="ml-1" [enableLink]="false" />
+          }
+        </span>
+        <small class="text-muted"
+          >{{ lookupItem.symbol }}
+          @if (lookupItem.currency) {
+            · {{ lookupItem.currency }}
+          }
+          @if (lookupItem.assetSubClass) {
+            · {{ lookupItem.assetSubClassString }}
+          }
+          @if (lookupItem.dataProviderInfo.name) {
+            · {{ lookupItem.dataProviderInfo.name }}
+          }
+        </small>
+      </mat-option>
+    } @empty {
+      @if (control.value?.length > 1) {
+        <mat-option class="line-height-1" disabled="true" i18n
+          >Oops! Could not find any assets.</mat-option
+        >
+      }
+    }
+  }
+</mat-autocomplete>
+
+@if (isLoading) {
+  <mat-spinner class="position-absolute" [diameter]="20" />
+}

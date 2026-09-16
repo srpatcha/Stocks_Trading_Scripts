@@ -1,0 +1,277 @@
+import { UNKNOWN_KEY } from '@ghostfolio/common/config';
+import {
+  convertValuesToPercentagesOfTotal,
+  getAssetProfileIdentifier,
+  getCountryName,
+  isCashPosition
+} from '@ghostfolio/common/helper';
+import {
+  InfoItem,
+  PortfolioPosition,
+  PublicPortfolioResponse
+} from '@ghostfolio/common/interfaces';
+import { hasPermission, permissions } from '@ghostfolio/common/permissions';
+import { Market } from '@ghostfolio/common/types';
+import { GfActivitiesTableComponent } from '@ghostfolio/ui/activities-table/activities-table.component';
+import { GfHoldingsTableComponent } from '@ghostfolio/ui/holdings-table/holdings-table.component';
+import { translate } from '@ghostfolio/ui/i18n';
+import { GfPortfolioProportionChartComponent } from '@ghostfolio/ui/portfolio-proportion-chart/portfolio-proportion-chart.component';
+import { DataService } from '@ghostfolio/ui/services';
+import { GfValueComponent } from '@ghostfolio/ui/value';
+import { GfWorldMapChartComponent } from '@ghostfolio/ui/world-map-chart';
+
+import { HttpErrorResponse } from '@angular/common/http';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  computed,
+  CUSTOM_ELEMENTS_SCHEMA,
+  DestroyRef,
+  inject,
+  OnInit
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCardModule } from '@angular/material/card';
+import { MatTableDataSource } from '@angular/material/table';
+import { ActivatedRoute, Router } from '@angular/router';
+import { StatusCodes } from 'http-status-codes';
+import { DeviceDetectorService } from 'ngx-device-detector';
+import { EMPTY } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'page' },
+  imports: [
+    GfActivitiesTableComponent,
+    GfHoldingsTableComponent,
+    GfPortfolioProportionChartComponent,
+    GfValueComponent,
+    GfWorldMapChartComponent,
+    MatButtonModule,
+    MatCardModule
+  ],
+  schemas: [CUSTOM_ELEMENTS_SCHEMA],
+  selector: 'gf-public-page',
+  styleUrls: ['./public-page.scss'],
+  templateUrl: './public-page.html'
+})
+export class GfPublicPageComponent implements OnInit {
+  protected continents: {
+    [code: string]: { name: string; value: number };
+  };
+  protected countries: {
+    [code: string]: { name: string; value: number };
+  };
+  protected readonly defaultAlias = $localize`someone`;
+  protected readonly deviceType = computed(
+    () => this.deviceDetectorService.deviceInfo().deviceType
+  );
+  protected hasPermissionForSubscription: boolean;
+  protected holdings: PublicPortfolioResponse['holdings'];
+  protected info: InfoItem;
+  protected isLoading = true;
+  protected latestActivitiesDataSource: MatTableDataSource<
+    PublicPortfolioResponse['latestActivities'][0]
+  >;
+  protected markets: {
+    [key in Market]: { id: Market; valueInPercentage: number };
+  };
+  protected readonly pageSize = Number.MAX_SAFE_INTEGER;
+  protected positions: {
+    [assetProfileIdentifier: string]: Pick<
+      PortfolioPosition['assetProfile'],
+      'currency' | 'name'
+    > & {
+      value: number;
+    };
+  };
+  protected publicPortfolioDetails: PublicPortfolioResponse;
+  protected sectors: {
+    [name: string]: { name: string; value: number };
+  };
+  protected symbols: {
+    [symbol: string]: { name: string; symbol: string; value: number };
+  };
+  protected readonly UNKNOWN_KEY = UNKNOWN_KEY;
+
+  private readonly activatedRoute = inject(ActivatedRoute);
+  private readonly changeDetectorRef = inject(ChangeDetectorRef);
+  private readonly dataService = inject(DataService);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly deviceDetectorService = inject(DeviceDetectorService);
+  private readonly router = inject(Router);
+
+  private accessId: string;
+
+  public constructor() {
+    this.activatedRoute.params.subscribe((params) => {
+      this.accessId = params['id'];
+    });
+
+    this.info = this.dataService.fetchInfo();
+
+    this.hasPermissionForSubscription = hasPermission(
+      this.info?.globalPermissions,
+      permissions.enableSubscription
+    );
+  }
+
+  public ngOnInit() {
+    this.dataService
+      .fetchPublicPortfolio(this.accessId)
+      .pipe(
+        takeUntilDestroyed(this.destroyRef),
+        catchError((error: HttpErrorResponse) => {
+          if (error.status === StatusCodes.NOT_FOUND) {
+            console.error(error);
+            this.router.navigate(['/']);
+          }
+
+          return EMPTY;
+        })
+      )
+      .subscribe((portfolioPublicDetails) => {
+        this.publicPortfolioDetails = portfolioPublicDetails;
+
+        this.initializeAnalysisData();
+
+        this.latestActivitiesDataSource = new MatTableDataSource(
+          this.publicPortfolioDetails.latestActivities
+        );
+
+        this.isLoading = false;
+
+        this.changeDetectorRef.markForCheck();
+      });
+  }
+
+  private initializeAnalysisData() {
+    this.continents = {
+      [UNKNOWN_KEY]: {
+        name: UNKNOWN_KEY,
+        value: 0
+      }
+    };
+    this.countries = {
+      [UNKNOWN_KEY]: {
+        name: UNKNOWN_KEY,
+        value: 0
+      }
+    };
+    this.holdings = [];
+    this.markets = this.publicPortfolioDetails.markets;
+    this.positions = {};
+    this.sectors = {
+      [UNKNOWN_KEY]: {
+        name: UNKNOWN_KEY,
+        value: 0
+      }
+    };
+    this.symbols = {
+      [UNKNOWN_KEY]: {
+        name: UNKNOWN_KEY,
+        symbol: UNKNOWN_KEY,
+        value: 0
+      }
+    };
+
+    let totalValueExcludingCashPositions = 0;
+
+    for (const position of this.publicPortfolioDetails.holdings) {
+      const assetProfileIdentifier = getAssetProfileIdentifier(
+        position.assetProfile
+      );
+
+      this.holdings.push(position);
+
+      this.positions[assetProfileIdentifier] = {
+        currency: position.assetProfile.currency,
+        name: position.assetProfile.name,
+        value: position.allocationInPercentage
+      };
+
+      if (!isCashPosition(position.assetProfile)) {
+        // Prepare analysis data by continents, countries, holdings and sectors
+        // except for cash
+
+        const value = position.valueInPercentage ?? 0;
+
+        totalValueExcludingCashPositions += value;
+
+        if (position.assetProfile.countries.length > 0) {
+          for (const country of position.assetProfile.countries) {
+            const { code, continent, weight } = country;
+
+            if (this.continents[continent]?.value) {
+              this.continents[continent].value += weight * value;
+            } else {
+              this.continents[continent] = {
+                name: translate(continent),
+                value: weight * value
+              };
+            }
+
+            if (this.countries[code]?.value) {
+              this.countries[code].value += weight * value;
+            } else {
+              this.countries[code] = {
+                name: getCountryName({ code }),
+                value: weight * value
+              };
+            }
+          }
+        } else {
+          this.continents[UNKNOWN_KEY].value += value;
+
+          this.countries[UNKNOWN_KEY].value += value;
+        }
+
+        if (position.assetProfile.sectors.length > 0) {
+          for (const sector of position.assetProfile.sectors) {
+            const { name, weight } = sector;
+
+            if (this.sectors[name]?.value) {
+              this.sectors[name].value += weight * value;
+            } else {
+              this.sectors[name] = {
+                name: translate(name),
+                value: weight * value
+              };
+            }
+          }
+        } else {
+          this.sectors[UNKNOWN_KEY].value += value;
+        }
+      }
+
+      const symbol = position.assetProfile.symbol;
+
+      const value = position.valueInPercentage ?? 0;
+
+      const symbolData = this.symbols[symbol];
+
+      if (symbolData) {
+        // Aggregate holdings with the same symbol from different data sources
+        symbolData.value += value;
+      } else {
+        this.symbols[symbol] = {
+          symbol,
+          value,
+          name: position.assetProfile.name ?? symbol
+        };
+      }
+    }
+
+    // The values are percentages of the whole portfolio, but the analysis data
+    // does not contain the cash positions
+    for (const values of [this.continents, this.countries, this.sectors]) {
+      convertValuesToPercentagesOfTotal({
+        values,
+        total: totalValueExcludingCashPositions
+      });
+    }
+  }
+}

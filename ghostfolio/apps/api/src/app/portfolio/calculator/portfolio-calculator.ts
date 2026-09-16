@@ -1,0 +1,1270 @@
+import { CurrentRateService } from '@ghostfolio/api/app/portfolio/current-rate.service';
+import { PortfolioSnapshotComputationError } from '@ghostfolio/api/app/portfolio/errors/portfolio-snapshot-computation.error';
+import { PortfolioCalculatorPosition } from '@ghostfolio/api/app/portfolio/interfaces/portfolio-calculator-position.interface';
+import { PortfolioOrder } from '@ghostfolio/api/app/portfolio/interfaces/portfolio-order.interface';
+import { PortfolioSnapshotValue } from '@ghostfolio/api/app/portfolio/interfaces/snapshot-value.interface';
+import { TransactionPointSymbol } from '@ghostfolio/api/app/portfolio/interfaces/transaction-point-symbol.interface';
+import { TransactionPoint } from '@ghostfolio/api/app/portfolio/interfaces/transaction-point.interface';
+import { RedisCacheService } from '@ghostfolio/api/app/redis-cache/redis-cache.service';
+import { getFactor } from '@ghostfolio/api/helper/portfolio.helper';
+import { LogPerformance } from '@ghostfolio/api/interceptors/performance-logging/performance-logging.interceptor';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import { ExchangeRateDataService } from '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service';
+import { DataGatheringItem } from '@ghostfolio/api/services/interfaces/interfaces';
+import { PortfolioSnapshotService } from '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service';
+import { getIntervalFromDateRange } from '@ghostfolio/common/calculation-helper';
+import {
+  INVESTMENT_ACTIVITY_TYPES,
+  PORTFOLIO_SNAPSHOT_PROCESS_JOB_NAME,
+  PORTFOLIO_SNAPSHOT_PROCESS_JOB_OPTIONS,
+  PORTFOLIO_SNAPSHOT_COMPUTATION_QUEUE_PRIORITY_HIGH,
+  PORTFOLIO_SNAPSHOT_COMPUTATION_QUEUE_PRIORITY_LOW
+} from '@ghostfolio/common/config';
+import { SubscriptionType } from '@ghostfolio/common/enums';
+import {
+  DATE_FORMAT,
+  getAssetProfileIdentifier,
+  getSum,
+  parseDate,
+  resetHours
+} from '@ghostfolio/common/helper';
+import {
+  Activity,
+  AssetProfileIdentifier,
+  DataProviderInfo,
+  Filter,
+  HistoricalDataItem,
+  InvestmentItem,
+  ResponseError,
+  SymbolMetrics
+} from '@ghostfolio/common/interfaces';
+import { PortfolioSnapshot } from '@ghostfolio/common/models';
+import { GroupBy } from '@ghostfolio/common/types';
+import { PerformanceCalculationType } from '@ghostfolio/common/types/performance-calculation-type.type';
+
+import { Logger } from '@nestjs/common';
+import { AssetSubClass } from '@prisma/client';
+import { Big } from 'big.js';
+import { plainToClass } from 'class-transformer';
+import {
+  differenceInDays,
+  eachDayOfInterval,
+  eachYearOfInterval,
+  endOfDay,
+  endOfYear,
+  format,
+  isAfter,
+  isBefore,
+  isFuture,
+  isPast,
+  isWithinInterval,
+  min,
+  startOfDay,
+  startOfYear,
+  subDays
+} from 'date-fns';
+import { groupBy, isNumber, sortBy, sum, uniqBy } from 'lodash';
+
+export abstract class PortfolioCalculator {
+  protected static readonly ENABLE_LOGGING = false;
+
+  private static readonly MAX_INITIALIZATION_ATTEMPTS = 3;
+
+  protected readonly logger = new Logger(PortfolioCalculator.name);
+
+  protected accountBalanceItems: HistoricalDataItem[];
+  protected activities: PortfolioOrder[];
+  protected activitiesByAssetProfileIdentifier: {
+    [assetProfileIdentifier: string]: PortfolioOrder[];
+  };
+
+  private configurationService: ConfigurationService;
+  private currency: string;
+  private currentRateService: CurrentRateService;
+  private dataProviderInfos: DataProviderInfo[];
+  private endDate: Date;
+  private exchangeRateDataService: ExchangeRateDataService;
+  private filters: Filter[];
+  private portfolioSnapshotService: PortfolioSnapshotService;
+  private redisCacheService: RedisCacheService;
+  private snapshot: PortfolioSnapshot;
+  private snapshotPromise: Promise<void>;
+  private startDate: Date;
+  private subscriptionType?: SubscriptionType;
+  private transactionPoints: TransactionPoint[];
+  private usePortfolioSnapshotCache: boolean;
+  private userId: string;
+
+  public constructor({
+    accountBalanceItems,
+    activities,
+    configurationService,
+    currency,
+    currentRateService,
+    exchangeRateDataService,
+    filters,
+    portfolioSnapshotService,
+    redisCacheService,
+    usePortfolioSnapshotCache = true,
+    subscriptionType,
+    userId
+  }: {
+    accountBalanceItems: HistoricalDataItem[];
+    activities: Activity[];
+    configurationService: ConfigurationService;
+    currency: string;
+    currentRateService: CurrentRateService;
+    exchangeRateDataService: ExchangeRateDataService;
+    filters: Filter[];
+    portfolioSnapshotService: PortfolioSnapshotService;
+    redisCacheService: RedisCacheService;
+    usePortfolioSnapshotCache?: boolean;
+    subscriptionType?: SubscriptionType;
+    userId: string;
+  }) {
+    this.accountBalanceItems = accountBalanceItems;
+    this.configurationService = configurationService;
+    this.currency = currency;
+    this.currentRateService = currentRateService;
+    this.exchangeRateDataService = exchangeRateDataService;
+    this.filters = filters;
+
+    let dateOfFirstActivity = new Date();
+
+    if (this.accountBalanceItems[0]) {
+      dateOfFirstActivity = parseDate(this.accountBalanceItems[0].date);
+    }
+
+    this.activities = activities
+      .map(
+        ({
+          assetProfile,
+          date,
+          feeInAssetProfileCurrency,
+          feeInBaseCurrency,
+          quantity,
+          tags = [],
+          type,
+          unitPriceInAssetProfileCurrency
+        }) => {
+          if (isBefore(date, dateOfFirstActivity)) {
+            dateOfFirstActivity = date;
+          }
+
+          if (isFuture(date)) {
+            // Adapt date to today if activity is in future (e.g. liability)
+            // to include it in the interval
+            date = endOfDay(new Date());
+          }
+
+          return {
+            assetProfile,
+            tags,
+            type,
+            date: format(date, DATE_FORMAT),
+            fee: new Big(feeInAssetProfileCurrency),
+            feeInBaseCurrency: new Big(feeInBaseCurrency),
+            quantity: new Big(quantity),
+            unitPrice: new Big(unitPriceInAssetProfileCurrency)
+          };
+        }
+      )
+      .sort((a, b) => {
+        return a.date?.localeCompare(b.date);
+      });
+
+    this.activitiesByAssetProfileIdentifier = groupBy(
+      this.activities,
+      ({ assetProfile }) => {
+        return getAssetProfileIdentifier(assetProfile);
+      }
+    );
+
+    this.portfolioSnapshotService = portfolioSnapshotService;
+    this.redisCacheService = redisCacheService;
+    this.usePortfolioSnapshotCache = usePortfolioSnapshotCache;
+    this.subscriptionType = subscriptionType;
+    this.userId = userId;
+
+    const { endDate, startDate } = getIntervalFromDateRange({
+      dateRange: 'max',
+      startDate: subDays(dateOfFirstActivity, 1)
+    });
+
+    this.endDate = endOfDay(endDate);
+    this.startDate = startOfDay(startDate);
+
+    this.computeTransactionPoints();
+
+    this.snapshotPromise = this.usePortfolioSnapshotCache
+      ? this.initialize()
+      : this.computeSnapshot().then((snapshot) => {
+          this.snapshot = snapshot;
+        });
+
+    // Mark the rejection as handled to prevent an unhandled promise rejection
+    // in case the snapshot promise is never awaited. Consumers awaiting it
+    // still receive the error.
+    this.snapshotPromise.catch(() => undefined);
+  }
+
+  protected abstract calculateOverallPerformance(
+    positions: PortfolioCalculatorPosition[]
+  ): PortfolioSnapshot;
+
+  @LogPerformance
+  public async computeSnapshot(): Promise<PortfolioSnapshot> {
+    const lastTransactionPoint = this.transactionPoints.at(-1);
+
+    const transactionPoints = this.transactionPoints?.filter(({ date }) => {
+      return isBefore(parseDate(date), this.endDate);
+    });
+
+    if (!transactionPoints.length) {
+      return {
+        activitiesCount: 0,
+        createdAt: new Date(),
+        currentValueInBaseCurrency: new Big(0),
+        errors: [],
+        hasErrors: false,
+        historicalData: [],
+        positions: [],
+        totalCashInBaseCurrency: new Big(0),
+        totalFeesWithCurrencyEffect: new Big(0),
+        totalInterestWithCurrencyEffect: new Big(0),
+        totalInvestment: new Big(0),
+        totalInvestmentWithCurrencyEffect: new Big(0),
+        totalLiabilitiesWithCurrencyEffect: new Big(0)
+      };
+    }
+
+    const cashAssetProfileIdentifiers = new Set<string>();
+    const currencies: { [assetProfileIdentifier: string]: string } = {};
+    const dataGatheringItems: DataGatheringItem[] = [];
+    let firstIndex = transactionPoints.length;
+    let firstTransactionPoint: TransactionPoint = null;
+    let totalCashInBaseCurrency = new Big(0);
+    let totalInterestWithCurrencyEffect = new Big(0);
+    let totalLiabilitiesWithCurrencyEffect = new Big(0);
+
+    for (const {
+      assetSubClass,
+      currency,
+      dataSource,
+      symbol
+    } of transactionPoints[firstIndex - 1].items) {
+      // Gather data for all assets except CASH
+      if (assetSubClass !== 'CASH') {
+        dataGatheringItems.push({
+          dataSource,
+          symbol
+        });
+      }
+
+      currencies[getAssetProfileIdentifier({ dataSource, symbol })] = currency;
+    }
+
+    for (let i = 0; i < transactionPoints.length; i++) {
+      if (
+        !isBefore(parseDate(transactionPoints[i].date), this.startDate) &&
+        firstTransactionPoint === null
+      ) {
+        firstTransactionPoint = transactionPoints[i];
+        firstIndex = i;
+      }
+    }
+
+    const exchangeRatesByCurrency =
+      await this.exchangeRateDataService.getExchangeRatesByCurrency({
+        currencies: Array.from(new Set(Object.values(currencies))),
+        endDate: this.endDate,
+        startDate: this.startDate,
+        targetCurrency: this.currency
+      });
+
+    const {
+      dataProviderInfos,
+      errors: currentRateErrors,
+      values: marketSymbols
+    } = await this.currentRateService.getValues({
+      dataGatheringItems,
+      dateQuery: {
+        gte: this.startDate,
+        lt: this.endDate
+      },
+      subscriptionType: this.subscriptionType
+    });
+
+    this.dataProviderInfos = dataProviderInfos;
+
+    const marketSymbolMap: {
+      [date: string]: { [assetProfileIdentifier: string]: Big };
+    } = {};
+
+    for (const marketSymbol of marketSymbols) {
+      const date = format(marketSymbol.date, DATE_FORMAT);
+
+      if (!marketSymbolMap[date]) {
+        marketSymbolMap[date] = {};
+      }
+
+      if (marketSymbol.marketPrice) {
+        marketSymbolMap[date][getAssetProfileIdentifier(marketSymbol)] =
+          new Big(marketSymbol.marketPrice);
+      }
+    }
+
+    const endDateString = format(this.endDate, DATE_FORMAT);
+
+    const daysInMarket = differenceInDays(this.endDate, this.startDate);
+
+    const chartDateMap = this.getChartDateMap({
+      endDate: this.endDate,
+      startDate: this.startDate,
+      step: Math.round(
+        daysInMarket /
+          Math.min(
+            daysInMarket,
+            this.configurationService.get('MAX_CHART_ITEMS')
+          )
+      )
+    });
+
+    for (const accountBalanceItem of this.accountBalanceItems) {
+      chartDateMap[accountBalanceItem.date] = true;
+    }
+
+    const chartDates = sortBy(Object.keys(chartDateMap), (chartDate) => {
+      return chartDate;
+    });
+
+    if (firstIndex > 0) {
+      firstIndex--;
+    }
+
+    const errors: ResponseError['errors'] = [];
+    let hasAnySymbolMetricsErrors = false;
+
+    const positions: PortfolioCalculatorPosition[] = [];
+
+    const accumulatedValuesByDate: {
+      [date: string]: {
+        investmentValueWithCurrencyEffect: Big;
+        totalCashValueWithCurrencyEffect: Big;
+        totalCurrentValue: Big;
+        totalCurrentValueWithCurrencyEffect: Big;
+        totalInvestmentValue: Big;
+        totalInvestmentValueWithCurrencyEffect: Big;
+        totalNetPerformanceValue: Big;
+        totalNetPerformanceValueWithCurrencyEffect: Big;
+        totalNetWorthValueWithCurrencyEffect: Big;
+        totalTimeWeightedInvestmentValue: Big;
+        totalTimeWeightedInvestmentValueWithCurrencyEffect: Big;
+      };
+    } = {};
+
+    const valuesByAssetProfileIdentifier: {
+      [assetProfileIdentifier: string]: {
+        currentValues: { [date: string]: Big };
+        currentValuesWithCurrencyEffect: { [date: string]: Big };
+        investmentValuesAccumulated: { [date: string]: Big };
+        investmentValuesAccumulatedWithCurrencyEffect: { [date: string]: Big };
+        investmentValuesWithCurrencyEffect: { [date: string]: Big };
+        netPerformanceValues: { [date: string]: Big };
+        netPerformanceValuesWithCurrencyEffect: { [date: string]: Big };
+        netWorthValuesWithCurrencyEffect: { [date: string]: Big };
+        timeWeightedInvestmentValues: { [date: string]: Big };
+        timeWeightedInvestmentValuesWithCurrencyEffect: { [date: string]: Big };
+      };
+    } = {};
+
+    for (const item of lastTransactionPoint.items) {
+      const assetProfileIdentifier = getAssetProfileIdentifier(item);
+
+      const marketPriceInBaseCurrency = (
+        marketSymbolMap[endDateString]?.[assetProfileIdentifier] ??
+        item.averagePrice
+      ).mul(
+        exchangeRatesByCurrency[`${item.currency}${this.currency}`]?.[
+          endDateString
+        ] ?? 1
+      );
+
+      const valueInBaseCurrency = marketPriceInBaseCurrency.mul(item.quantity);
+
+      const isCashInBaseCurrency =
+        item.assetSubClass === AssetSubClass.CASH &&
+        item.currency === this.currency &&
+        item.symbol === this.currency;
+
+      const {
+        currentValues,
+        currentValuesWithCurrencyEffect,
+        grossPerformance,
+        grossPerformancePercentage,
+        grossPerformancePercentageWithCurrencyEffect,
+        grossPerformanceWithCurrencyEffect,
+        hasErrors,
+        investmentValuesAccumulated,
+        investmentValuesAccumulatedWithCurrencyEffect,
+        investmentValuesWithCurrencyEffect,
+        netPerformance,
+        netPerformancePercentage,
+        netPerformancePercentageWithCurrencyEffectMap,
+        netPerformanceValues,
+        netPerformanceValuesWithCurrencyEffect,
+        netPerformanceWithCurrencyEffectMap,
+        timeWeightedInvestment,
+        timeWeightedInvestmentValues,
+        timeWeightedInvestmentValuesWithCurrencyEffect,
+        timeWeightedInvestmentWithCurrencyEffect,
+        totalDividend,
+        totalDividendInBaseCurrency,
+        totalInterestInBaseCurrency,
+        totalInvestment,
+        totalInvestmentWithCurrencyEffect,
+        totalLiabilitiesInBaseCurrency
+      } = this.getSymbolMetrics({
+        chartDateMap,
+        marketSymbolMap,
+        dataSource: item.dataSource,
+        end: this.endDate,
+        exchangeRates:
+          exchangeRatesByCurrency[`${item.currency}${this.currency}`],
+        start: this.startDate,
+        symbol: item.symbol
+      });
+
+      hasAnySymbolMetricsErrors = hasAnySymbolMetricsErrors || hasErrors;
+
+      // Cash in the base currency cannot generate a currency effect and thus
+      // contributes nothing but its balance to the performance calculation. It
+      // is therefore excluded from the value and the investment, while still
+      // contributing to the net worth.
+      valuesByAssetProfileIdentifier[assetProfileIdentifier] =
+        isCashInBaseCurrency
+          ? {
+              currentValues: {},
+              currentValuesWithCurrencyEffect: {},
+              investmentValuesAccumulated: {},
+              investmentValuesAccumulatedWithCurrencyEffect: {},
+              investmentValuesWithCurrencyEffect: {},
+              netPerformanceValues: {},
+              netPerformanceValuesWithCurrencyEffect: {},
+              netWorthValuesWithCurrencyEffect: currentValuesWithCurrencyEffect,
+              timeWeightedInvestmentValues: {},
+              timeWeightedInvestmentValuesWithCurrencyEffect: {}
+            }
+          : {
+              currentValues,
+              currentValuesWithCurrencyEffect,
+              investmentValuesAccumulated,
+              investmentValuesAccumulatedWithCurrencyEffect,
+              investmentValuesWithCurrencyEffect,
+              netPerformanceValues,
+              netPerformanceValuesWithCurrencyEffect,
+              timeWeightedInvestmentValues,
+              timeWeightedInvestmentValuesWithCurrencyEffect,
+              netWorthValuesWithCurrencyEffect: currentValuesWithCurrencyEffect
+            };
+
+      positions.push({
+        timeWeightedInvestment,
+        timeWeightedInvestmentWithCurrencyEffect,
+        activitiesCount: item.activitiesCount,
+        averagePrice: item.averagePrice,
+        currency: item.currency,
+        dataSource: item.dataSource,
+        dateOfFirstActivity: item.dateOfFirstActivity,
+        dividend: totalDividend,
+        dividendInBaseCurrency: totalDividendInBaseCurrency,
+        fee: item.fee,
+        feeInBaseCurrency: item.feeInBaseCurrency,
+        grossPerformance: !hasErrors ? (grossPerformance ?? null) : null,
+        grossPerformancePercentage: !hasErrors
+          ? (grossPerformancePercentage ?? null)
+          : null,
+        grossPerformancePercentageWithCurrencyEffect: !hasErrors
+          ? (grossPerformancePercentageWithCurrencyEffect ?? null)
+          : null,
+        grossPerformanceWithCurrencyEffect: !hasErrors
+          ? (grossPerformanceWithCurrencyEffect ?? null)
+          : null,
+        includeInHoldings: item.includeInHoldings,
+        includeInPerformance: !isCashInBaseCurrency,
+        investment: totalInvestment,
+        investmentWithCurrencyEffect: totalInvestmentWithCurrencyEffect,
+        marketPrice:
+          marketSymbolMap[endDateString]?.[
+            assetProfileIdentifier
+          ]?.toNumber() ?? 1,
+        marketPriceInBaseCurrency: marketPriceInBaseCurrency?.toNumber() ?? 1,
+        netPerformance: !hasErrors ? (netPerformance ?? null) : null,
+        netPerformancePercentage: !hasErrors
+          ? (netPerformancePercentage ?? null)
+          : null,
+        netPerformancePercentageWithCurrencyEffectMap: !hasErrors
+          ? (netPerformancePercentageWithCurrencyEffectMap ?? null)
+          : null,
+        netPerformanceWithCurrencyEffectMap: !hasErrors
+          ? (netPerformanceWithCurrencyEffectMap ?? null)
+          : null,
+        quantity: item.quantity,
+        symbol: item.symbol,
+        tags: item.tags,
+        valueInBaseCurrency
+      });
+
+      if (item.assetSubClass === AssetSubClass.CASH) {
+        cashAssetProfileIdentifiers.add(assetProfileIdentifier);
+
+        totalCashInBaseCurrency =
+          totalCashInBaseCurrency.plus(valueInBaseCurrency);
+      }
+
+      totalInterestWithCurrencyEffect = totalInterestWithCurrencyEffect.plus(
+        totalInterestInBaseCurrency
+      );
+
+      totalLiabilitiesWithCurrencyEffect =
+        totalLiabilitiesWithCurrencyEffect.plus(totalLiabilitiesInBaseCurrency);
+
+      if (
+        (hasErrors ||
+          currentRateErrors.find(({ dataSource, symbol }) => {
+            return dataSource === item.dataSource && symbol === item.symbol;
+          })) &&
+        item.investment.gt(0) &&
+        item.skipErrors === false
+      ) {
+        errors.push({ dataSource: item.dataSource, symbol: item.symbol });
+      }
+    }
+
+    const assetProfileIdentifiers = Object.keys(valuesByAssetProfileIdentifier);
+
+    for (const dateString of chartDates) {
+      for (const assetProfileIdentifier of assetProfileIdentifiers) {
+        const assetProfileValues =
+          valuesByAssetProfileIdentifier[assetProfileIdentifier];
+
+        const currentValue =
+          assetProfileValues.currentValues?.[dateString] ?? new Big(0);
+
+        const currentValueWithCurrencyEffect =
+          assetProfileValues.currentValuesWithCurrencyEffect?.[dateString] ??
+          new Big(0);
+
+        const investmentValueAccumulated =
+          assetProfileValues.investmentValuesAccumulated?.[dateString] ??
+          new Big(0);
+
+        const investmentValueAccumulatedWithCurrencyEffect =
+          assetProfileValues.investmentValuesAccumulatedWithCurrencyEffect?.[
+            dateString
+          ] ?? new Big(0);
+
+        const investmentValueWithCurrencyEffect =
+          assetProfileValues.investmentValuesWithCurrencyEffect?.[dateString] ??
+          new Big(0);
+
+        const netPerformanceValue =
+          assetProfileValues.netPerformanceValues?.[dateString] ?? new Big(0);
+
+        const netPerformanceValueWithCurrencyEffect =
+          assetProfileValues.netPerformanceValuesWithCurrencyEffect?.[
+            dateString
+          ] ?? new Big(0);
+
+        const netWorthValueWithCurrencyEffect =
+          assetProfileValues.netWorthValuesWithCurrencyEffect?.[dateString] ??
+          new Big(0);
+
+        const timeWeightedInvestmentValue =
+          assetProfileValues.timeWeightedInvestmentValues?.[dateString] ??
+          new Big(0);
+
+        const timeWeightedInvestmentValueWithCurrencyEffect =
+          assetProfileValues.timeWeightedInvestmentValuesWithCurrencyEffect?.[
+            dateString
+          ] ?? new Big(0);
+
+        accumulatedValuesByDate[dateString] = {
+          investmentValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.investmentValueWithCurrencyEffect ?? new Big(0)
+          ).add(investmentValueWithCurrencyEffect),
+          totalCashValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.totalCashValueWithCurrencyEffect ?? new Big(0)
+          ).add(
+            cashAssetProfileIdentifiers.has(assetProfileIdentifier)
+              ? netWorthValueWithCurrencyEffect
+              : new Big(0)
+          ),
+          totalCurrentValue: (
+            accumulatedValuesByDate[dateString]?.totalCurrentValue ?? new Big(0)
+          ).add(currentValue),
+          totalCurrentValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.totalCurrentValueWithCurrencyEffect ?? new Big(0)
+          ).add(currentValueWithCurrencyEffect),
+          totalInvestmentValue: (
+            accumulatedValuesByDate[dateString]?.totalInvestmentValue ??
+            new Big(0)
+          ).add(investmentValueAccumulated),
+          totalInvestmentValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.totalInvestmentValueWithCurrencyEffect ?? new Big(0)
+          ).add(investmentValueAccumulatedWithCurrencyEffect),
+          totalNetPerformanceValue: (
+            accumulatedValuesByDate[dateString]?.totalNetPerformanceValue ??
+            new Big(0)
+          ).add(netPerformanceValue),
+          totalNetPerformanceValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.totalNetPerformanceValueWithCurrencyEffect ?? new Big(0)
+          ).add(netPerformanceValueWithCurrencyEffect),
+          totalNetWorthValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.totalNetWorthValueWithCurrencyEffect ?? new Big(0)
+          ).add(netWorthValueWithCurrencyEffect),
+          totalTimeWeightedInvestmentValue: (
+            accumulatedValuesByDate[dateString]
+              ?.totalTimeWeightedInvestmentValue ?? new Big(0)
+          ).add(timeWeightedInvestmentValue),
+          totalTimeWeightedInvestmentValueWithCurrencyEffect: (
+            accumulatedValuesByDate[dateString]
+              ?.totalTimeWeightedInvestmentValueWithCurrencyEffect ?? new Big(0)
+          ).add(timeWeightedInvestmentValueWithCurrencyEffect)
+        };
+      }
+    }
+
+    const historicalData: HistoricalDataItem[] = Object.entries(
+      accumulatedValuesByDate
+    ).map(([date, values]) => {
+      const {
+        investmentValueWithCurrencyEffect,
+        totalCashValueWithCurrencyEffect,
+        totalCurrentValue,
+        totalCurrentValueWithCurrencyEffect,
+        totalInvestmentValue,
+        totalInvestmentValueWithCurrencyEffect,
+        totalNetPerformanceValue,
+        totalNetPerformanceValueWithCurrencyEffect,
+        totalNetWorthValueWithCurrencyEffect,
+        totalTimeWeightedInvestmentValue,
+        totalTimeWeightedInvestmentValueWithCurrencyEffect
+      } = values;
+
+      const netPerformanceInPercentage = totalTimeWeightedInvestmentValue.eq(0)
+        ? 0
+        : totalNetPerformanceValue
+            .div(totalTimeWeightedInvestmentValue)
+            .toNumber();
+
+      const netPerformanceInPercentageWithCurrencyEffect =
+        totalTimeWeightedInvestmentValueWithCurrencyEffect.eq(0)
+          ? 0
+          : totalNetPerformanceValueWithCurrencyEffect
+              .div(totalTimeWeightedInvestmentValueWithCurrencyEffect)
+              .toNumber();
+
+      return {
+        date,
+        netPerformanceInPercentage,
+        netPerformanceInPercentageWithCurrencyEffect,
+        investmentValueWithCurrencyEffect:
+          investmentValueWithCurrencyEffect.toNumber(),
+        netPerformance: totalNetPerformanceValue.toNumber(),
+        netPerformanceWithCurrencyEffect:
+          totalNetPerformanceValueWithCurrencyEffect.toNumber(),
+        netWorth: totalNetWorthValueWithCurrencyEffect.toNumber(),
+        totalCashInBaseCurrency: totalCashValueWithCurrencyEffect.toNumber(),
+        totalInvestment: totalInvestmentValue.toNumber(),
+        totalInvestmentValueWithCurrencyEffect:
+          totalInvestmentValueWithCurrencyEffect.toNumber(),
+        value: totalCurrentValue.toNumber(),
+        valueWithCurrencyEffect: totalCurrentValueWithCurrencyEffect.toNumber()
+      };
+    });
+
+    const overall = this.calculateOverallPerformance(positions);
+
+    const positionsIncludedInHoldings = positions
+      .filter(({ includeInHoldings }) => {
+        return includeInHoldings;
+      })
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      .map(({ includeInHoldings, includeInPerformance, ...rest }) => {
+        return rest;
+      });
+
+    return {
+      ...overall,
+      errors,
+      historicalData,
+      totalCashInBaseCurrency,
+      totalInterestWithCurrencyEffect,
+      totalLiabilitiesWithCurrencyEffect,
+      hasErrors: hasAnySymbolMetricsErrors || overall.hasErrors,
+      positions: positionsIncludedInHoldings
+    };
+  }
+
+  protected abstract getPerformanceCalculationType(): PerformanceCalculationType;
+
+  public getDataProviderInfos() {
+    return this.dataProviderInfos;
+  }
+
+  public async getDividendInBaseCurrency() {
+    await this.snapshotPromise;
+
+    return getSum(
+      this.snapshot.positions.map(({ dividendInBaseCurrency }) => {
+        return dividendInBaseCurrency;
+      })
+    );
+  }
+
+  public async getFeesInBaseCurrency() {
+    await this.snapshotPromise;
+
+    return this.snapshot.totalFeesWithCurrencyEffect;
+  }
+
+  public async getInterestInBaseCurrency() {
+    await this.snapshotPromise;
+
+    return this.snapshot.totalInterestWithCurrencyEffect;
+  }
+
+  public getInvestments(): { date: string; investment: Big }[] {
+    if (this.transactionPoints.length === 0) {
+      return [];
+    }
+
+    return this.transactionPoints.map((transactionPoint) => {
+      return {
+        date: transactionPoint.date,
+        investment: transactionPoint.items.reduce(
+          (investment, transactionPointSymbol) =>
+            investment.plus(transactionPointSymbol.investment),
+          new Big(0)
+        )
+      };
+    });
+  }
+
+  public getInvestmentsByGroup({
+    data,
+    groupBy
+  }: {
+    data: HistoricalDataItem[];
+    groupBy: GroupBy;
+  }): InvestmentItem[] {
+    const groupedData: { [dateGroup: string]: Big } = {};
+
+    for (const { date, investmentValueWithCurrencyEffect } of data) {
+      const dateGroup =
+        groupBy === 'month' ? date.substring(0, 7) : date.substring(0, 4);
+      groupedData[dateGroup] = (groupedData[dateGroup] ?? new Big(0)).plus(
+        investmentValueWithCurrencyEffect
+      );
+    }
+
+    return Object.keys(groupedData).map((dateGroup) => ({
+      date: groupBy === 'month' ? `${dateGroup}-01` : `${dateGroup}-01-01`,
+      investment: groupedData[dateGroup].toNumber()
+    }));
+  }
+
+  public async getLiabilitiesInBaseCurrency() {
+    await this.snapshotPromise;
+
+    return this.snapshot.totalLiabilitiesWithCurrencyEffect;
+  }
+
+  public async getPerformance({ end, start }) {
+    await this.snapshotPromise;
+
+    const { historicalData } = this.snapshot;
+
+    const chart: HistoricalDataItem[] = [];
+
+    let netPerformanceAtStartDate: number;
+    let netPerformanceWithCurrencyEffectAtStartDate: number;
+    const totalInvestmentValuesWithCurrencyEffect: number[] = [];
+
+    for (const historicalDataItem of historicalData) {
+      const date = resetHours(parseDate(historicalDataItem.date));
+
+      if (!isBefore(date, start) && !isAfter(date, end)) {
+        if (!isNumber(netPerformanceAtStartDate)) {
+          netPerformanceAtStartDate = historicalDataItem.netPerformance;
+
+          netPerformanceWithCurrencyEffectAtStartDate =
+            historicalDataItem.netPerformanceWithCurrencyEffect;
+        }
+
+        const netPerformanceSinceStartDate =
+          historicalDataItem.netPerformance - netPerformanceAtStartDate;
+
+        const netPerformanceWithCurrencyEffectSinceStartDate =
+          historicalDataItem.netPerformanceWithCurrencyEffect -
+          netPerformanceWithCurrencyEffectAtStartDate;
+
+        if (historicalDataItem.totalInvestmentValueWithCurrencyEffect > 0) {
+          totalInvestmentValuesWithCurrencyEffect.push(
+            historicalDataItem.totalInvestmentValueWithCurrencyEffect
+          );
+        }
+
+        const timeWeightedInvestmentValue =
+          totalInvestmentValuesWithCurrencyEffect.length > 0
+            ? sum(totalInvestmentValuesWithCurrencyEffect) /
+              totalInvestmentValuesWithCurrencyEffect.length
+            : 0;
+
+        chart.push({
+          ...historicalDataItem,
+          netPerformance:
+            historicalDataItem.netPerformance - netPerformanceAtStartDate,
+          netPerformanceWithCurrencyEffect:
+            netPerformanceWithCurrencyEffectSinceStartDate,
+          netPerformanceInPercentage:
+            timeWeightedInvestmentValue === 0
+              ? 0
+              : netPerformanceSinceStartDate / timeWeightedInvestmentValue,
+          netPerformanceInPercentageWithCurrencyEffect:
+            timeWeightedInvestmentValue === 0
+              ? 0
+              : netPerformanceWithCurrencyEffectSinceStartDate /
+                timeWeightedInvestmentValue
+        });
+      }
+    }
+
+    return { chart };
+  }
+
+  public async getSnapshot() {
+    await this.snapshotPromise;
+
+    return this.snapshot;
+  }
+
+  public getStartDate() {
+    let firstAccountBalanceDate: Date;
+    let firstActivityDate: Date;
+
+    if (this.accountBalanceItems?.length > 0) {
+      try {
+        const firstAccountBalanceDateString = this.accountBalanceItems[0].date;
+        firstAccountBalanceDate = firstAccountBalanceDateString
+          ? parseDate(firstAccountBalanceDateString)
+          : new Date();
+      } catch (error) {
+        firstAccountBalanceDate = new Date();
+      }
+    }
+
+    if (this.transactionPoints?.length > 0) {
+      try {
+        const firstActivityDateString = this.transactionPoints[0].date;
+        firstActivityDate = firstActivityDateString
+          ? parseDate(firstActivityDateString)
+          : new Date();
+      } catch (error) {
+        firstActivityDate = new Date();
+      }
+    }
+
+    const dates = [firstAccountBalanceDate, firstActivityDate].filter(
+      (date) => {
+        return !!date;
+      }
+    );
+
+    if (dates.length === 0) {
+      return undefined;
+    }
+
+    return min(dates);
+  }
+
+  protected abstract getSymbolMetrics({
+    chartDateMap,
+    dataSource,
+    end,
+    exchangeRates,
+    marketSymbolMap,
+    start,
+    symbol
+  }: {
+    chartDateMap: { [date: string]: boolean };
+    end: Date;
+    exchangeRates: { [dateString: string]: number };
+    marketSymbolMap: {
+      [date: string]: { [assetProfileIdentifier: string]: Big };
+    };
+    start: Date;
+  } & AssetProfileIdentifier): SymbolMetrics;
+
+  public getTransactionPoints() {
+    return this.transactionPoints;
+  }
+
+  private getChartDateMap({
+    endDate,
+    startDate,
+    step
+  }: {
+    endDate: Date;
+    startDate: Date;
+    step: number;
+  }): { [date: string]: true } {
+    // Create a map of all relevant chart dates:
+    // 1. Add transaction point dates
+    const chartDateMap = this.transactionPoints.reduce((result, { date }) => {
+      result[date] = true;
+      return result;
+    }, {});
+
+    // 2. Add dates between transactions respecting the specified step size
+    for (const date of eachDayOfInterval(
+      { end: endDate, start: startDate },
+      { step }
+    )) {
+      chartDateMap[format(date, DATE_FORMAT)] = true;
+    }
+
+    if (step > 1) {
+      // Reduce the step size of last 90 days
+      for (const date of eachDayOfInterval(
+        { end: endDate, start: subDays(endDate, 90) },
+        { step: 3 }
+      )) {
+        chartDateMap[format(date, DATE_FORMAT)] = true;
+      }
+
+      // Reduce the step size of last 30 days
+      for (const date of eachDayOfInterval(
+        { end: endDate, start: subDays(endDate, 30) },
+        { step: 1 }
+      )) {
+        chartDateMap[format(date, DATE_FORMAT)] = true;
+      }
+    }
+
+    // Make sure the end date is present
+    chartDateMap[format(endDate, DATE_FORMAT)] = true;
+
+    // Make sure some key dates are present
+    for (const dateRange of ['1d', '1y', '5y', 'max', 'mtd', 'wtd', 'ytd']) {
+      const { endDate: dateRangeEnd, startDate: dateRangeStart } =
+        getIntervalFromDateRange({ dateRange });
+
+      if (
+        !isBefore(dateRangeStart, startDate) &&
+        !isAfter(dateRangeStart, endDate)
+      ) {
+        chartDateMap[format(dateRangeStart, DATE_FORMAT)] = true;
+      }
+
+      if (
+        !isBefore(dateRangeEnd, startDate) &&
+        !isAfter(dateRangeEnd, endDate)
+      ) {
+        chartDateMap[format(dateRangeEnd, DATE_FORMAT)] = true;
+      }
+    }
+
+    // Make sure the first and last date of each calendar year is present
+    const interval = { start: startDate, end: endDate };
+
+    for (const date of eachYearOfInterval(interval)) {
+      const yearStart = startOfYear(date);
+      const yearEnd = endOfYear(date);
+
+      if (isWithinInterval(yearStart, interval)) {
+        // Add start of year (YYYY-01-01)
+        chartDateMap[format(yearStart, DATE_FORMAT)] = true;
+      }
+
+      if (isWithinInterval(yearEnd, interval)) {
+        // Add end of year (YYYY-12-31)
+        chartDateMap[format(yearEnd, DATE_FORMAT)] = true;
+      }
+    }
+
+    return chartDateMap;
+  }
+
+  @LogPerformance
+  private computeTransactionPoints() {
+    this.transactionPoints = [];
+    const transactionPointSymbols: {
+      [assetProfileIdentifier: string]: TransactionPointSymbol;
+    } = {};
+
+    let lastDate: string = null;
+    let lastTransactionPoint: TransactionPoint = null;
+
+    for (const {
+      assetProfile,
+      date,
+      fee,
+      feeInBaseCurrency,
+      quantity,
+      tags,
+      type,
+      unitPrice
+    } of this.activities) {
+      let currentTransactionPointItem: TransactionPointSymbol;
+
+      const assetSubClass = assetProfile.assetSubClass;
+      const currency = assetProfile.currency;
+      const dataSource = assetProfile.dataSource;
+      const factor = getFactor(type);
+      const skipErrors = !!assetProfile.userId; // Skip errors for custom asset profiles
+      const symbol = assetProfile.symbol;
+
+      const assetProfileIdentifier = getAssetProfileIdentifier(assetProfile);
+
+      const oldAccumulatedSymbol =
+        transactionPointSymbols[assetProfileIdentifier];
+
+      if (oldAccumulatedSymbol) {
+        let investment = oldAccumulatedSymbol.investment;
+
+        let newQuantity = quantity
+          .mul(factor)
+          .plus(oldAccumulatedSymbol.quantity);
+
+        if (type === 'BUY') {
+          if (oldAccumulatedSymbol.investment.gte(0)) {
+            investment = oldAccumulatedSymbol.investment.plus(
+              quantity.mul(unitPrice)
+            );
+          } else {
+            investment = oldAccumulatedSymbol.investment.plus(
+              quantity.mul(oldAccumulatedSymbol.averagePrice)
+            );
+          }
+        } else if (type === 'SELL') {
+          if (oldAccumulatedSymbol.investment.gt(0)) {
+            investment = oldAccumulatedSymbol.investment.minus(
+              quantity.mul(oldAccumulatedSymbol.averagePrice)
+            );
+          } else {
+            investment = oldAccumulatedSymbol.investment.minus(
+              quantity.mul(unitPrice)
+            );
+          }
+        }
+
+        if (newQuantity.abs().lt(Number.EPSILON)) {
+          // Reset to zero if quantity is (almost) zero to avoid rounding issues
+          investment = new Big(0);
+          newQuantity = new Big(0);
+        }
+
+        currentTransactionPointItem = {
+          assetSubClass,
+          currency,
+          dataSource,
+          investment,
+          skipErrors,
+          symbol,
+          activitiesCount: oldAccumulatedSymbol.activitiesCount + 1,
+          averagePrice: newQuantity.eq(0)
+            ? new Big(0)
+            : investment.div(newQuantity).abs(),
+          dateOfFirstActivity: oldAccumulatedSymbol.dateOfFirstActivity,
+          dividend: new Big(0),
+          fee: oldAccumulatedSymbol.fee.plus(fee),
+          feeInBaseCurrency:
+            oldAccumulatedSymbol.feeInBaseCurrency.plus(feeInBaseCurrency),
+          includeInHoldings: oldAccumulatedSymbol.includeInHoldings,
+          quantity: newQuantity,
+          tags: oldAccumulatedSymbol.tags.concat(tags)
+        };
+      } else {
+        currentTransactionPointItem = {
+          assetSubClass,
+          currency,
+          dataSource,
+          fee,
+          feeInBaseCurrency,
+          skipErrors,
+          symbol,
+          tags,
+          activitiesCount: 1,
+          averagePrice: unitPrice,
+          dateOfFirstActivity: date,
+          dividend: new Big(0),
+          includeInHoldings: INVESTMENT_ACTIVITY_TYPES.includes(type),
+          investment: unitPrice.mul(quantity).mul(factor),
+          quantity: quantity.mul(factor)
+        };
+      }
+
+      currentTransactionPointItem.tags = uniqBy(
+        currentTransactionPointItem.tags,
+        'id'
+      );
+
+      transactionPointSymbols[assetProfileIdentifier] =
+        currentTransactionPointItem;
+
+      const items = lastTransactionPoint?.items ?? [];
+
+      const newItems = items.filter((item) => {
+        return getAssetProfileIdentifier(item) !== assetProfileIdentifier;
+      });
+
+      newItems.push(currentTransactionPointItem);
+
+      newItems.sort((a, b) => {
+        return (
+          a.symbol?.localeCompare(b.symbol) ||
+          a.dataSource?.localeCompare(b.dataSource)
+        );
+      });
+
+      let fees = new Big(0);
+
+      if (type === 'FEE') {
+        fees = fee;
+      }
+
+      let interest = new Big(0);
+
+      if (type === 'INTEREST') {
+        interest = quantity.mul(unitPrice);
+      }
+
+      let liabilities = new Big(0);
+
+      if (type === 'LIABILITY') {
+        liabilities = quantity.mul(unitPrice);
+      }
+
+      if (lastDate !== date || lastTransactionPoint === null) {
+        lastTransactionPoint = {
+          date,
+          fees,
+          interest,
+          liabilities,
+          items: newItems
+        };
+
+        this.transactionPoints.push(lastTransactionPoint);
+      } else {
+        lastTransactionPoint.fees = lastTransactionPoint.fees.plus(fees);
+        lastTransactionPoint.interest =
+          lastTransactionPoint.interest.plus(interest);
+        lastTransactionPoint.items = newItems;
+        lastTransactionPoint.liabilities =
+          lastTransactionPoint.liabilities.plus(liabilities);
+      }
+
+      lastDate = date;
+    }
+  }
+
+  @LogPerformance
+  private async initialize(attempt = 1) {
+    const startTimeTotal = performance.now();
+
+    let cachedPortfolioSnapshot: PortfolioSnapshot | undefined;
+    let isCachedPortfolioSnapshotExpired = false;
+    const portfolioSnapshotKey = this.redisCacheService.getPortfolioSnapshotKey(
+      {
+        filters: this.filters,
+        userId: this.userId
+      }
+    );
+
+    const jobId = portfolioSnapshotKey;
+
+    try {
+      const cachedPortfolioSnapshotValue =
+        await this.redisCacheService.get(portfolioSnapshotKey);
+
+      const { expiration, portfolioSnapshot }: PortfolioSnapshotValue =
+        JSON.parse(cachedPortfolioSnapshotValue);
+
+      cachedPortfolioSnapshot = plainToClass(
+        PortfolioSnapshot,
+        portfolioSnapshot
+      );
+
+      if (isPast(new Date(expiration))) {
+        isCachedPortfolioSnapshotExpired = true;
+      }
+    } catch {}
+
+    if (cachedPortfolioSnapshot) {
+      this.snapshot = cachedPortfolioSnapshot;
+
+      this.logger.debug(
+        `Fetched portfolio snapshot from cache in ${(
+          (performance.now() - startTimeTotal) /
+          1000
+        ).toFixed(3)} seconds`
+      );
+
+      if (isCachedPortfolioSnapshotExpired) {
+        // Compute in the background
+        this.portfolioSnapshotService.addJobToQueue({
+          data: {
+            calculationType: this.getPerformanceCalculationType(),
+            filters: this.filters,
+            userCurrency: this.currency,
+            userId: this.userId
+          },
+          name: PORTFOLIO_SNAPSHOT_PROCESS_JOB_NAME,
+          opts: {
+            ...PORTFOLIO_SNAPSHOT_PROCESS_JOB_OPTIONS,
+            jobId,
+            priority: PORTFOLIO_SNAPSHOT_COMPUTATION_QUEUE_PRIORITY_LOW
+          }
+        });
+      }
+    } else {
+      if (attempt > PortfolioCalculator.MAX_INITIALIZATION_ATTEMPTS) {
+        throw new PortfolioSnapshotComputationError(
+          `Portfolio snapshot of user '${this.userId}' could not be computed after ${PortfolioCalculator.MAX_INITIALIZATION_ATTEMPTS} attempts`
+        );
+      }
+
+      // Wait for computation
+      await this.portfolioSnapshotService.addJobToQueue({
+        data: {
+          calculationType: this.getPerformanceCalculationType(),
+          filters: this.filters,
+          userCurrency: this.currency,
+          userId: this.userId
+        },
+        name: PORTFOLIO_SNAPSHOT_PROCESS_JOB_NAME,
+        opts: {
+          ...PORTFOLIO_SNAPSHOT_PROCESS_JOB_OPTIONS,
+          jobId,
+          priority: PORTFOLIO_SNAPSHOT_COMPUTATION_QUEUE_PRIORITY_HIGH
+        }
+      });
+
+      const job = await this.portfolioSnapshotService.getJob(jobId);
+
+      if (job) {
+        await job.finished();
+      }
+
+      await this.initialize(attempt + 1);
+    }
+  }
+}

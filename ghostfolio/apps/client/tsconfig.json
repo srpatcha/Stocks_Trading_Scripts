@@ -1,0 +1,36 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "files": [],
+  "include": [],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
+    {
+      "path": "./tsconfig.spec.json"
+    },
+    {
+      "path": "./tsconfig.editor.json"
+    }
+  ],
+  "angularCompilerOptions": {
+    "strictInjectionParameters": true,
+    // TODO: Remove these subsets once strictTemplates is enabled
+    "strictAttributeTypes": true,
+    "strictContextGenerics": true,
+    "strictDomEventTypes": true,
+    "strictDomLocalRefTypes": true,
+    "strictInputAccessModifiers": true,
+    "strictInputTypes": false,
+    "strictLiteralTypes": true,
+    "strictNullInputTypes": true,
+    "strictOutputEventTypes": true,
+    "strictSafeNavigationTypes": true,
+    // TODO: Enable stricter rules for this project
+    "strictTemplates": false
+  },
+  "compilerOptions": {
+    "module": "preserve",
+    "strictNullChecks": true
+  }
+}

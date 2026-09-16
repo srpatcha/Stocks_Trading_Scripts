@@ -1,0 +1,132 @@
+<form
+  class="d-flex flex-column h-100"
+  [formGroup]="accountForm"
+  (keyup.enter)="accountForm.valid && onSubmit()"
+  (ngSubmit)="onSubmit()"
+>
+  @if (data.account.id) {
+    <h1 i18n mat-dialog-title>Update account</h1>
+  } @else {
+    <h1 i18n mat-dialog-title>Add account</h1>
+  }
+  <div class="flex-grow-1 py-3" mat-dialog-content>
+    <div>
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Name</mat-label>
+        <input
+          formControlName="name"
+          matInput
+          (keydown.enter)="$event.stopPropagation()"
+        />
+      </mat-form-field>
+    </div>
+    <div>
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Currency</mat-label>
+        <gf-currency-selector
+          formControlName="currency"
+          [currencies]="currencies"
+        />
+      </mat-form-field>
+    </div>
+    <div>
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Cash Balance</mat-label>
+        <input
+          formControlName="balance"
+          matInput
+          type="number"
+          (keydown.enter)="$event.stopPropagation()"
+        />
+        <span class="ml-2" matTextSuffix>{{
+          accountForm.get('currency')?.value
+        }}</span>
+      </mat-form-field>
+    </div>
+    <div [class.d-none]="platforms?.length < 1">
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Platform</mat-label>
+        @if (selectedPlatform) {
+          <gf-entity-logo
+            class="ml-3"
+            matPrefix
+            [hasPlaceholder]="true"
+            [tooltip]="selectedPlatform?.name"
+            [url]="selectedPlatform?.url"
+          />
+        }
+        <input
+          formControlName="platformId"
+          matInput
+          type="text"
+          [matAutocomplete]="auto"
+          (blur)="autoCompleteCheck()"
+          (keydown.enter)="$event.stopPropagation()"
+        />
+        <mat-autocomplete #auto="matAutocomplete" [displayWith]="displayFn">
+          @for (
+            platformEntry of filteredPlatforms | async;
+            track platformEntry
+          ) {
+            <mat-option [value]="platformEntry">
+              <span class="d-flex">
+                <gf-entity-logo
+                  class="mr-1"
+                  [hasPlaceholder]="true"
+                  [tooltip]="platformEntry.name"
+                  [url]="platformEntry.url"
+                />
+                <span>{{ platformEntry.name }}</span>
+              </span>
+            </mat-option>
+          }
+        </mat-autocomplete>
+      </mat-form-field>
+    </div>
+    <div>
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Note</mat-label>
+        <textarea
+          cdkAutosizeMinRows="2"
+          cdkTextareaAutosize
+          formControlName="comment"
+          matInput
+          [maxlength]="COMMENT_MAXIMUM_LENGTH"
+          (keyup.enter)="$event.stopPropagation()"
+        ></textarea>
+      </mat-form-field>
+    </div>
+    <div class="mb-3">
+      <gf-tags-selector
+        formControlName="tags"
+        [hasPermissionToCreateTag]="hasPermissionToCreateOwnTag"
+        [tagsAvailable]="tagsAvailable"
+      />
+    </div>
+    @if (data.account.id) {
+      <div>
+        <mat-form-field appearance="outline" class="w-100">
+          <mat-label i18n>Account ID</mat-label>
+          <input formControlName="accountId" matInput />
+        </mat-form-field>
+      </div>
+    }
+  </div>
+  <div class="justify-content-end" mat-dialog-actions>
+    <button mat-button type="button" (click)="onCancel()">
+      @if (accountForm.dirty) {
+        <ng-container i18n>Cancel</ng-container>
+      } @else {
+        <ng-container i18n>Close</ng-container>
+      }
+    </button>
+    <button
+      color="primary"
+      mat-flat-button
+      type="submit"
+      [disabled]="!(accountForm.dirty && accountForm.valid)"
+    >
+      <ng-container i18n>Save</ng-container>
+    </button>
+  </div>
+</form>

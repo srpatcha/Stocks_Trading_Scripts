@@ -1,0 +1,9 @@
+:host {
+  display: block;
+
+  .subscription {
+    .mat-mdc-form-field {
+      max-width: 100%;
+    }
+  }
+}

@@ -1,0 +1,415 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = []
+  binaryTargets   = ["debian-openssl-3.0.x", "linux-arm64-openssl-3.0.x", "native"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Access {
+  alias         String?
+  createdAt     DateTime   @default(now())
+  expiresAt     DateTime
+  granteeUser   User?      @relation("accessGet", fields: [granteeUserId], onDelete: Cascade, references: [id])
+  granteeUserId String?
+  id            String     @id @default(uuid())
+  lastUsedAt    DateTime?
+  scopes        String[]   @default([])
+  settings      Json       @default("{}")
+  type          AccessType @default(PRIVATE)
+  updatedAt     DateTime   @updatedAt
+  userId        String
+  user          User       @relation("accessGive", fields: [userId], onDelete: Cascade, references: [id])
+
+  @@index([alias])
+  @@index([granteeUserId])
+  @@index([userId])
+}
+
+model Account {
+  activities Order[]
+  balances   AccountBalance[]
+  comment    String?
+  createdAt  DateTime         @default(now())
+  currency   String?
+  id         String           @default(uuid())
+  name       String?
+  platform   Platform?        @relation(fields: [platformId], references: [id])
+  platformId String?
+  tags       TagsOnAccounts[]
+  updatedAt  DateTime         @updatedAt
+  user       User             @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId     String
+
+  @@id([id, userId])
+  @@index([currency])
+  @@index([id])
+  @@index([name])
+  @@index([userId])
+}
+
+model AccountBalance {
+  account   Account  @relation(fields: [accountId, userId], onDelete: Cascade, references: [id, userId])
+  accountId String
+  createdAt DateTime @default(now())
+  date      DateTime @default(now())
+  id        String   @id @default(uuid())
+  updatedAt DateTime @updatedAt
+  userId    String
+  value     Float
+
+  @@unique([accountId, date])
+  @@index([accountId])
+  @@index([date])
+}
+
+model Analytics {
+  activityCount                       Int      @default(0)
+  country                             String?
+  dataProviderGhostfolioDailyRequests Int      @default(0)
+  lastRequestAt                       DateTime @default(now())
+  updatedAt                           DateTime @updatedAt
+  user                                User     @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId                              String   @id
+
+  @@index([lastRequestAt])
+  @@index([updatedAt])
+}
+
+model ApiKey {
+  createdAt DateTime @default(now())
+  hashedKey String   @unique
+  id        String   @id @default(uuid())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId    String
+
+  @@index([userId])
+}
+
+model AssetProfileOverrides {
+  assetClass      AssetClass?
+  assetSubClass   AssetSubClass?
+  countries       Json?          @default("[]")
+  holdings        Json?          @default("[]")
+  name            String?
+  sectors         Json?          @default("[]")
+  symbolProfile   SymbolProfile  @relation(fields: [symbolProfileId], onDelete: Cascade, references: [id])
+  symbolProfileId String         @id
+  updatedAt       DateTime       @updatedAt
+  url             String?
+
+  @@map("SymbolProfileOverrides")
+}
+
+model AssetProfileResolution {
+  createdAt        DateTime   @default(now())
+  currency         String
+  dataSourceOrigin DataSource
+  dataSourceTarget DataSource
+  id               String     @id @default(uuid())
+  requestCount     Int        @default(1)
+  symbolOrigin     String
+  symbolTarget     String
+  updatedAt        DateTime   @updatedAt
+
+  @@unique([dataSourceOrigin, symbolOrigin])
+}
+
+/// A stock split of an asset profile. The numerator is the number of shares
+/// held after the split, the denominator the number of shares held before, for
+/// example 4 and 1 for a 4:1 split or 1 and 10 for a 1:10 reverse split.
+///
+/// The ratio is stored as two integers instead of the resulting factor, so that
+/// it stays exact, for example 1/3 for a 1:3 reverse split.
+///
+/// Activities before the date are adjusted by the ratio: the quantity is
+/// multiplied by it and the unit price divided by it, so that the total value
+/// of an activity stays the same.
+///
+/// Market data is already split-adjusted by the data providers and must not be
+/// adjusted again.
+model AssetProfileSplit {
+  createdAt       DateTime      @default(now())
+  date            DateTime
+  denominator     Int
+  id              String        @id @default(uuid())
+  numerator       Int
+  symbolProfile   SymbolProfile @relation(fields: [symbolProfileId], onDelete: Cascade, references: [id])
+  symbolProfileId String
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([symbolProfileId, date])
+  @@index([date])
+}
+
+model AuthDevice {
+  createdAt           DateTime @default(now())
+  credentialId        Bytes
+  credentialPublicKey Bytes
+  counter             Int
+  id                  String   @id @default(uuid())
+  updatedAt           DateTime @updatedAt
+  user                User     @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId              String
+
+  @@index([userId])
+}
+
+model MarketData {
+  createdAt        DateTime        @default(now())
+  dataSource       DataSource
+  date             DateTime
+  id               String          @id @default(uuid())
+  isCarriedForward Boolean         @default(false)
+  marketPrice      Float
+  state            MarketDataState @default(CLOSE)
+  symbol           String
+
+  @@unique([dataSource, date, symbol])
+  @@index([dataSource])
+  @@index([dataSource, symbol])
+  @@index([date])
+  @@index([marketPrice])
+  @@index([state])
+  @@index([symbol])
+}
+
+model Order {
+  account         Account?      @relation(fields: [accountId, accountUserId], references: [id, userId])
+  accountId       String?
+  accountUserId   String?
+  comment         String?
+  createdAt       DateTime      @default(now())
+  currency        String?
+  date            DateTime
+  fee             Float
+  id              String        @id @default(uuid())
+  quantity        Float
+  symbolProfileId String
+  tags            Tag[]
+  type            Type
+  unitPrice       Float
+  updatedAt       DateTime      @updatedAt
+  user            User          @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId          String
+  SymbolProfile   SymbolProfile @relation(fields: [symbolProfileId], references: [id])
+
+  @@index([accountId])
+  @@index([date])
+  @@index([symbolProfileId, date])
+  @@index([userId, date])
+  @@index([userId, type, date])
+}
+
+model Platform {
+  accounts Account[]
+  id       String    @id @default(uuid())
+  name     String?
+  url      String    @unique
+
+  @@index([name])
+}
+
+model Property {
+  key   String @id
+  value String
+}
+
+model Settings {
+  settings  Json?
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId    String   @id
+}
+
+model SymbolProfile {
+  activities             Order[]
+  assetClass             AssetClass?
+  assetProfileOverrides  AssetProfileOverrides?
+  assetProfileSplits     AssetProfileSplit[]
+  assetSubClass          AssetSubClass?
+  comment                String?
+  countries              Json?
+  createdAt              DateTime               @default(now())
+  currency               String
+  cusip                  String?
+  dataGatheringFrequency DataGatheringFrequency @default(DAILY)
+  dataSource             DataSource
+  figi                   String?
+  figiComposite          String?
+  figiShareClass         String?
+  holdings               Json?                  @default("[]")
+  id                     String                 @id @default(uuid())
+  isActive               Boolean                @default(true)
+  isin                   String?
+  name                   String?
+  scraperConfiguration   Json?
+  sectors                Json?
+  symbol                 String
+  symbolMapping          Json?
+  updatedAt              DateTime               @updatedAt
+  url                    String?
+  user                   User?                  @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId                 String?
+  watchedBy              User[]                 @relation("UserWatchlist")
+
+  @@unique([dataSource, symbol])
+  @@index([assetClass])
+  @@index([currency])
+  @@index([cusip])
+  @@index([dataGatheringFrequency])
+  @@index([dataSource])
+  @@index([isActive])
+  @@index([isin])
+  @@index([name])
+  @@index([symbol])
+}
+
+model Subscription {
+  createdAt               DateTime @default(now())
+  expiresAt               DateTime
+  id                      String   @id @default(uuid())
+  price                   Float?
+  stripeCheckoutSessionId String?  @unique
+  updatedAt               DateTime @updatedAt
+  user                    User     @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId                  String
+
+  @@index([userId])
+}
+
+model Tag {
+  accounts   TagsOnAccounts[]
+  activities Order[]
+  id         String           @id @default(uuid())
+  name       String
+  user       User?            @relation(fields: [userId], onDelete: Cascade, references: [id])
+  userId     String?
+
+  @@unique([name, userId])
+  @@index([name])
+}
+
+model TagsOnAccounts {
+  account   Account  @relation(fields: [accountId, userId], onDelete: Cascade, references: [id, userId])
+  accountId String
+  createdAt DateTime @default(now())
+  tag       Tag      @relation(fields: [tagId], onDelete: Cascade, references: [id])
+  tagId     String
+  updatedAt DateTime @updatedAt
+  userId    String
+
+  @@id([accountId, tagId, userId])
+  @@index([tagId])
+}
+
+model User {
+  accessesGet   Access[]        @relation("accessGet")
+  accessesGive  Access[]        @relation("accessGive")
+  accessToken   String?
+  accounts      Account[]
+  activities    Order[]
+  analytics     Analytics?
+  apiKeys       ApiKey[]
+  authChallenge String?
+  authDevices   AuthDevice[]
+  createdAt     DateTime        @default(now())
+  id            String          @id @default(uuid())
+  provider      Provider        @default(ANONYMOUS)
+  role          Role            @default(USER)
+  settings      Settings?
+  subscriptions Subscription[]
+  tags          Tag[]
+  thirdPartyId  String?
+  updatedAt     DateTime        @updatedAt
+  watchlist     SymbolProfile[] @relation("UserWatchlist")
+  SymbolProfile SymbolProfile[]
+
+  @@index([accessToken])
+  @@index([createdAt])
+  @@index([provider])
+  @@index([role])
+  @@index([thirdPartyId])
+}
+
+enum AccessType {
+  MCP
+  PRIVATE
+  PUBLIC
+}
+
+enum AssetClass {
+  ALTERNATIVE_INVESTMENT
+  COMMODITY
+  EQUITY
+  FIXED_INCOME
+  LIQUIDITY
+  REAL_ESTATE
+}
+
+enum AssetSubClass {
+  BOND
+  CASH
+  COLLECTIBLE
+  COMMODITY
+  CRYPTOCURRENCY
+  ETF
+  LOAN
+  MUTUALFUND
+  PRECIOUS_METAL
+  PRIVATE_EQUITY
+  STOCK
+}
+
+enum DataGatheringFrequency {
+  DAILY
+  HOURLY
+}
+
+enum DataSource {
+  ALPHA_VANTAGE
+  COINGECKO
+  EOD_HISTORICAL_DATA
+  FINANCIAL_MODELING_PREP
+  GHOSTFOLIO
+  GOOGLE_SHEETS
+  MANUAL
+  RAPID_API
+  YAHOO
+}
+
+enum MarketDataState {
+  CLOSE
+  INTRADAY
+}
+
+enum Provider {
+  ANONYMOUS
+  GOOGLE
+  INTERNET_IDENTITY
+  OIDC
+}
+
+enum Role {
+  ADMIN
+  DEMO
+  INACTIVE
+  USER
+}
+
+enum Type {
+  BUY
+  DIVIDEND
+  FEE
+  INTEREST
+  LIABILITY
+  SELL
+}
+
+enum ViewMode {
+  DEFAULT
+  ZEN
+}

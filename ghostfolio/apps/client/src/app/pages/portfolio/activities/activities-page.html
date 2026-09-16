@@ -1,0 +1,53 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <h1 class="d-none d-sm-block h3 mb-3 text-center" i18n>Activities</h1>
+      <gf-activities-table
+        [activityTypes]="user?.activityTypes"
+        [baseCurrency]="user?.settings?.baseCurrency"
+        [dataSource]="dataSource"
+        [deviceType]="deviceType"
+        [hasActivities]="user?.activitiesCount > 0"
+        [hasPermissionToCreateActivity]="hasPermissionToCreateActivity"
+        [hasPermissionToDeleteActivity]="hasPermissionToDeleteActivity"
+        [hasPermissionToExportActivities]="!hasImpersonationId"
+        [hasPermissionToFilterByType]="user?.settings?.isExperimentalFeatures"
+        [hasPermissionToImportActivities]="hasPermissionToImportActivities"
+        [hasPermissionToUpdateActivity]="hasPermissionToUpdateActivity"
+        [locale]="user?.settings?.locale"
+        [pageIndex]="pageIndex"
+        [pageSize]="pageSize"
+        [showActions]="
+          (hasPermissionToCreateActivity ||
+            hasPermissionToDeleteActivity ||
+            hasPermissionToUpdateActivity) &&
+          !user.settings.isRestrictedView
+        "
+        [sortColumn]="sortColumn"
+        [sortDirection]="sortDirection"
+        [totalItems]="totalItems"
+        (activitiesDeleted)="onDeleteActivities()"
+        (activityClicked)="onClickActivity($event)"
+        (activityDeleted)="onDeleteActivity($event)"
+        (export)="onExport()"
+        (exportDrafts)="onExportDrafts($event)"
+        (import)="onImport()"
+        (importDividends)="onImportDividends()"
+        (pageChanged)="onChangePage($event)"
+        (sortChanged)="onSortChanged($event)"
+        (typesFilterChanged)="onTypesFilterChanged($event)"
+      />
+    </div>
+  </div>
+
+  @if (hasPermissionToCreateActivity) {
+    <gf-fab
+      [routerLink]="
+        internalRoutes.portfolio.subRoutes.activities.subRoutes.create
+          .routerLink
+      "
+    />
+  }
+</div>
+
+<router-outlet />

@@ -1,0 +1,195 @@
+import { WebAuthnService } from '@ghostfolio/client/services/web-authn.service';
+import { Filter, User } from '@ghostfolio/common/interfaces';
+import { hasPermission, permissions } from '@ghostfolio/common/permissions';
+
+import { HttpClient } from '@angular/common/http';
+import { computed, DestroyRef, inject, Service } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { MatDialog } from '@angular/material/dialog';
+import { ObservableStore } from '@codewithdan/observable-store';
+import { parseISO } from 'date-fns';
+import { DeviceDetectorService } from 'ngx-device-detector';
+import { Observable, of } from 'rxjs';
+import { throwError } from 'rxjs';
+import { catchError, map } from 'rxjs/operators';
+
+import { SubscriptionInterstitialDialogParams } from '../../components/subscription-interstitial-dialog/interfaces/interfaces';
+import { GfSubscriptionInterstitialDialogComponent } from '../../components/subscription-interstitial-dialog/subscription-interstitial-dialog.component';
+import { UserStoreActions } from './user-store.actions';
+import { UserStoreState } from './user-store.state';
+
+@Service()
+export class UserService extends ObservableStore<UserStoreState> {
+  private readonly deviceType = computed(
+    () => this.deviceDetectorService.deviceInfo().deviceType
+  );
+
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly deviceDetectorService = inject(DeviceDetectorService);
+  private readonly dialog = inject(MatDialog);
+  private readonly http = inject(HttpClient);
+  private readonly webAuthnService = inject(WebAuthnService);
+
+  public constructor() {
+    super({ trackStateHistory: true });
+
+    this.setState({ user: undefined }, UserStoreActions.Initialize);
+  }
+
+  public get(force = false) {
+    const state = this.getState();
+
+    if (state?.user && force !== true) {
+      // Get from cache
+      return of(state.user);
+    } else {
+      // Get from endpoint
+      return this.fetchUser().pipe(catchError(this.handleError));
+    }
+  }
+
+  public getFilters() {
+    const filters: Filter[] = [];
+    const user = this.getState().user;
+
+    if (user?.settings['filters.accounts']) {
+      filters.push({
+        id: user.settings['filters.accounts'][0],
+        type: 'ACCOUNT'
+      });
+    }
+
+    if (user?.settings['filters.assetClasses']) {
+      filters.push({
+        id: user.settings['filters.assetClasses'][0],
+        type: 'ASSET_CLASS'
+      });
+    }
+
+    if (user?.settings['filters.dataSource']) {
+      filters.push({
+        id: user.settings['filters.dataSource'],
+        type: 'DATA_SOURCE'
+      });
+    }
+
+    if (user?.settings['filters.symbol']) {
+      filters.push({
+        id: user.settings['filters.symbol'],
+        type: 'SYMBOL'
+      });
+    }
+
+    if (user?.settings['filters.tags']) {
+      filters.push({
+        id: user.settings['filters.tags'][0],
+        type: 'TAG'
+      });
+    }
+
+    return filters;
+  }
+
+  public hasFilters() {
+    return this.getFilters().length > 0;
+  }
+
+  public reset() {
+    this.setState({ user: undefined }, UserStoreActions.RemoveUser);
+  }
+
+  public signOut() {
+    const utmSource = window.localStorage.getItem('utm_source');
+
+    if (this.webAuthnService.isEnabled()) {
+      this.webAuthnService.deregister().subscribe();
+    }
+
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+
+    void this.clearAllCookies();
+
+    this.reset();
+
+    if (utmSource) {
+      window.localStorage.setItem('utm_source', utmSource);
+    }
+  }
+
+  private async clearAllCookies() {
+    if (!('cookieStore' in window)) {
+      console.warn('Cookie Store API not available in this browser');
+      return;
+    }
+
+    const cookies = await cookieStore.getAll();
+
+    const cookieNames = cookies
+      .map(({ name }) => {
+        return name;
+      })
+      .filter((name): name is string => {
+        return !!name;
+      });
+
+    await Promise.all(
+      cookieNames.map((name) => {
+        return cookieStore.delete(name);
+      })
+    );
+  }
+
+  private fetchUser(): Observable<User> {
+    return this.http.get<any>('/api/v1/user').pipe(
+      map((user) => {
+        if (user.dateOfFirstActivity) {
+          user.dateOfFirstActivity = parseISO(user.dateOfFirstActivity);
+        }
+
+        if (user.settings?.retirementDate) {
+          user.settings.retirementDate = parseISO(user.settings.retirementDate);
+        }
+
+        this.setState({ user }, UserStoreActions.GetUser);
+
+        if (
+          hasPermission(
+            user.permissions,
+            permissions.enableSubscriptionInterstitial
+          )
+        ) {
+          const dialogRef = this.dialog.open<
+            GfSubscriptionInterstitialDialogComponent,
+            SubscriptionInterstitialDialogParams
+          >(GfSubscriptionInterstitialDialogComponent, {
+            autoFocus: false,
+            data: {
+              user
+            },
+            disableClose: true,
+            height: this.deviceType() === 'mobile' ? '98vh' : '80vh',
+            width: this.deviceType() === 'mobile' ? '100vw' : '50rem'
+          });
+
+          dialogRef
+            .afterClosed()
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe();
+        }
+
+        return user;
+      }),
+      catchError(this.handleError)
+    );
+  }
+
+  private handleError(error: any) {
+    if (error.error instanceof Error) {
+      const errMessage = error.error.message;
+      return throwError(errMessage);
+    }
+
+    return throwError(error ?? 'Server error');
+  }
+}

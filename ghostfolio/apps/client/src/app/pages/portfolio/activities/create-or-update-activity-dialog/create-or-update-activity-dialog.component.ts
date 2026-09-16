@@ -1,0 +1,616 @@
+import { ImpersonationStorageService } from '@ghostfolio/client/services/impersonation-storage.service';
+import { UserService } from '@ghostfolio/client/services/user/user.service';
+import {
+  ASSET_CLASS_MAPPING,
+  COMMENT_MAXIMUM_LENGTH,
+  DEFAULT_LOCALE
+} from '@ghostfolio/common/config';
+import { CreateOrderDto, UpdateOrderDto } from '@ghostfolio/common/dtos';
+import {
+  getDateFormatString,
+  getStringOrNull
+} from '@ghostfolio/common/helper';
+import {
+  AssetClassSelectorOption,
+  LookupItem
+} from '@ghostfolio/common/interfaces';
+import { hasPermission, permissions } from '@ghostfolio/common/permissions';
+import { validateObjectForForm } from '@ghostfolio/common/utils';
+import { GfAccountSelectorComponent } from '@ghostfolio/ui/account-selector';
+import { translate } from '@ghostfolio/ui/i18n';
+import { DataService } from '@ghostfolio/ui/services';
+import { GfSymbolAutocompleteComponent } from '@ghostfolio/ui/symbol-autocomplete';
+import { GfTagsSelectorComponent } from '@ghostfolio/ui/tags-selector';
+import { GfValueComponent } from '@ghostfolio/ui/value';
+
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  DestroyRef,
+  inject
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import {
+  FormBuilder,
+  FormGroup,
+  ReactiveFormsModule,
+  Validators
+} from '@angular/forms';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { DateAdapter, MAT_DATE_LOCALE } from '@angular/material/core';
+import { MatDatepickerModule } from '@angular/material/datepicker';
+import {
+  MAT_DIALOG_DATA,
+  MatDialogModule,
+  MatDialogRef
+} from '@angular/material/dialog';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
+import { MatSelectModule } from '@angular/material/select';
+import { IonIcon } from '@ionic/angular/standalone';
+import { AssetClass, Tag, Type } from '@prisma/client';
+import { isAfter, isToday } from 'date-fns';
+import { addIcons } from 'ionicons';
+import { calendarClearOutline, refreshOutline } from 'ionicons/icons';
+import { EMPTY } from 'rxjs';
+import { catchError, delay } from 'rxjs/operators';
+
+import { CreateOrUpdateActivityDialogParams } from './interfaces/interfaces';
+import { ActivityType } from './types/activity-type.type';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'h-100' },
+  imports: [
+    GfAccountSelectorComponent,
+    GfSymbolAutocompleteComponent,
+    GfTagsSelectorComponent,
+    GfValueComponent,
+    IonIcon,
+    MatButtonModule,
+    MatCheckboxModule,
+    MatDatepickerModule,
+    MatDialogModule,
+    MatFormFieldModule,
+    MatInputModule,
+    MatSelectModule,
+    ReactiveFormsModule
+  ],
+  selector: 'gf-create-or-update-activity-dialog',
+  styleUrls: ['./create-or-update-activity-dialog.scss'],
+  templateUrl: 'create-or-update-activity-dialog.html'
+})
+export class GfCreateOrUpdateActivityDialogComponent {
+  protected readonly COMMENT_MAXIMUM_LENGTH = COMMENT_MAXIMUM_LENGTH;
+  protected readonly DEFAULT_LOCALE = DEFAULT_LOCALE;
+
+  protected activityForm: FormGroup;
+
+  protected readonly assetClassOptions: AssetClassSelectorOption[] =
+    Object.keys(AssetClass)
+      .map((id) => {
+        return { id, label: translate(id) } as AssetClassSelectorOption;
+      })
+      .sort((a, b) => {
+        return a.label.localeCompare(b.label);
+      });
+
+  protected assetSubClassOptions: AssetClassSelectorOption[] = [];
+  protected currencies: string[] = [];
+  protected currencyOfAssetProfile: string | undefined;
+  protected currentMarketPrice: number | null = null;
+  protected defaultDateFormat: string;
+  protected defaultLookupItems: LookupItem[] = [];
+  protected hasPermissionToCreateOwnTag: boolean;
+  protected isLoading = false;
+  protected readonly isToday = isToday;
+  protected readonly labelAccount = $localize`Account`;
+  protected mode: 'create' | 'update';
+  protected tagsAvailable: Tag[] = [];
+  protected total = 0;
+  protected readonly typesTranslationMap = new Map<Type, string>();
+  protected readonly Validators = Validators;
+
+  protected readonly data =
+    inject<CreateOrUpdateActivityDialogParams>(MAT_DIALOG_DATA);
+
+  private readonly changeDetectorRef = inject(ChangeDetectorRef);
+  private readonly dataService = inject(DataService);
+  private readonly dateAdapter = inject<DateAdapter<Date, string>>(DateAdapter);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly dialogRef =
+    inject<MatDialogRef<GfCreateOrUpdateActivityDialogComponent>>(MatDialogRef);
+  private readonly formBuilder = inject(FormBuilder);
+  private readonly impersonationStorageService = inject(
+    ImpersonationStorageService
+  );
+  private locale = inject<string>(MAT_DATE_LOCALE);
+  private readonly userService = inject(UserService);
+
+  public constructor() {
+    addIcons({ calendarClearOutline, refreshOutline });
+  }
+
+  public ngOnInit() {
+    this.currencyOfAssetProfile = this.data.activity?.assetProfile?.currency;
+
+    // A tag created during an impersonation belongs to the authenticated user,
+    // hence it cannot be assigned to the data of the impersonated user
+    this.hasPermissionToCreateOwnTag =
+      !this.impersonationStorageService.getId() &&
+      hasPermission(this.data.user?.permissions, permissions.createOwnTag);
+
+    this.locale = this.data.user.settings.locale ?? DEFAULT_LOCALE;
+    this.mode = this.data.activity?.id ? 'update' : 'create';
+
+    this.dateAdapter.setLocale(this.locale);
+
+    const { currencies } = this.dataService.fetchInfo();
+
+    this.currencies = currencies;
+    this.defaultDateFormat = getDateFormatString(this.locale);
+
+    this.dataService
+      .fetchPortfolioHoldings({
+        filters: [{ id: 'ACTIVE', type: 'HOLDING_TYPE' }]
+      })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(({ holdings }) => {
+        this.defaultLookupItems = holdings
+          .filter(({ assetProfile }) => {
+            return !['CASH'].includes(assetProfile.assetSubClass);
+          })
+          .sort((a, b) => {
+            return (a.assetProfile.name ?? '').localeCompare(
+              b.assetProfile.name ?? ''
+            );
+          })
+          .map(({ assetProfile }) => {
+            return {
+              assetClass: assetProfile.assetClass,
+              assetSubClass: assetProfile.assetSubClass,
+              currency: assetProfile.currency ?? '',
+              dataProviderInfo: {
+                isPremium: false
+              },
+              dataSource: assetProfile.dataSource,
+              name: assetProfile.name ?? '',
+              symbol: assetProfile.symbol
+            };
+          });
+
+        this.changeDetectorRef.markForCheck();
+      });
+
+    this.tagsAvailable =
+      this.data.user?.tags?.map((tag) => {
+        return {
+          ...tag,
+          name: translate(tag.name)
+        };
+      }) ?? [];
+
+    for (const type of Object.keys(ActivityType)) {
+      this.typesTranslationMap[ActivityType[type]] = translate(
+        ActivityType[type]
+      );
+    }
+
+    this.activityForm = this.formBuilder.group({
+      accountId: [
+        this.data.accounts.length === 1 &&
+        !this.data.activity?.accountId &&
+        this.mode === 'create'
+          ? this.data.accounts[0].id
+          : this.data.activity?.accountId
+      ],
+      assetClass: [this.data.activity?.assetProfile?.assetClass],
+      assetSubClass: [this.data.activity?.assetProfile?.assetSubClass],
+      comment: [this.data.activity?.comment],
+      currency: [
+        this.data.activity?.assetProfile?.currency,
+        Validators.required
+      ],
+      currencyOfUnitPrice: [
+        this.data.activity?.currency ??
+          this.data.activity?.assetProfile?.currency,
+        Validators.required
+      ],
+      dataSource: [
+        this.data.activity?.assetProfile?.dataSource,
+        Validators.required
+      ],
+      date: [this.data.activity?.date, Validators.required],
+      fee: [this.data.activity?.fee, Validators.required],
+      name: [this.data.activity?.assetProfile?.name, Validators.required],
+      quantity: [this.data.activity?.quantity, Validators.required],
+      searchSymbol: [
+        this.data.activity?.assetProfile
+          ? {
+              dataSource: this.data.activity?.assetProfile?.dataSource,
+              symbol: this.data.activity?.assetProfile?.symbol
+            }
+          : null,
+        Validators.required
+      ],
+      tags: [
+        this.data.activity?.tags?.map(({ id, name }) => {
+          return {
+            id,
+            name: translate(name)
+          };
+        })
+      ],
+      type: [undefined, Validators.required], // Set after value changes subscription
+      unitPrice: [this.data.activity?.unitPrice, Validators.required],
+      updateAccountBalance: [false]
+    });
+
+    this.activityForm.valueChanges
+      .pipe(
+        // Slightly delay until the more specific form control value changes have
+        // completed
+        delay(300),
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe(async () => {
+        if (
+          ['BUY', 'FEE', 'VALUABLE'].includes(
+            this.activityForm.get('type')?.value
+          )
+        ) {
+          this.total =
+            this.activityForm.get('quantity')?.value *
+              this.activityForm.get('unitPrice')?.value +
+            (this.activityForm.get('fee')?.value ?? 0);
+        } else {
+          this.total =
+            this.activityForm.get('quantity')?.value *
+              this.activityForm.get('unitPrice')?.value -
+            (this.activityForm.get('fee')?.value ?? 0);
+        }
+
+        this.changeDetectorRef.markForCheck();
+      });
+
+    this.activityForm.get('accountId')?.valueChanges.subscribe((accountId) => {
+      const type = this.activityForm.get('type')?.value;
+
+      if (['FEE', 'INTEREST', 'LIABILITY', 'VALUABLE'].includes(type)) {
+        const currency =
+          this.data.accounts.find(({ id }) => {
+            return id === accountId;
+          })?.currency ?? this.data.user.settings.baseCurrency;
+
+        this.activityForm.get('currency')?.setValue(currency);
+        this.activityForm.get('currencyOfUnitPrice')?.setValue(currency);
+      }
+
+      this.syncUpdateAccountBalanceControl();
+    });
+
+    this.activityForm
+      .get('assetClass')
+      ?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((assetClass) => {
+        const assetSubClasses = ASSET_CLASS_MAPPING.get(assetClass) ?? [];
+
+        this.assetSubClassOptions = assetSubClasses
+          .map((assetSubClass) => {
+            return {
+              id: assetSubClass,
+              label: translate(assetSubClass)
+            };
+          })
+          .sort((a, b) => a.label.localeCompare(b.label));
+
+        this.activityForm.get('assetSubClass')?.setValue(null);
+
+        this.changeDetectorRef.markForCheck();
+      });
+
+    this.activityForm.get('date')?.valueChanges.subscribe(() => {
+      this.syncUpdateAccountBalanceControl();
+
+      this.changeDetectorRef.markForCheck();
+    });
+
+    this.activityForm.get('searchSymbol')?.valueChanges.subscribe(() => {
+      if (this.activityForm.get('searchSymbol')?.invalid) {
+        this.data.activity.assetProfile = null;
+      } else if (
+        ['BUY', 'DIVIDEND', 'SELL'].includes(
+          this.activityForm.get('type')?.value
+        )
+      ) {
+        this.updateAssetProfile();
+      }
+
+      this.changeDetectorRef.markForCheck();
+    });
+
+    this.activityForm.get('tags')?.valueChanges.subscribe((tags: Tag[]) => {
+      const newTag = tags.find(({ id }) => {
+        return id === undefined;
+      });
+
+      if (newTag && this.hasPermissionToCreateOwnTag) {
+        this.dataService
+          .postTag({ ...newTag, userId: this.data.user.id })
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe((tag) => {
+            this.activityForm.get('tags')?.setValue(
+              tags.map((currentTag) => {
+                if (currentTag.id === undefined) {
+                  return tag;
+                }
+
+                return currentTag;
+              })
+            );
+
+            this.userService
+              .get(true)
+              .pipe(takeUntilDestroyed(this.destroyRef))
+              .subscribe();
+          });
+      }
+    });
+
+    this.activityForm
+      .get('type')
+      ?.valueChanges.pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((type: ActivityType) => {
+        if (
+          type === 'VALUABLE' ||
+          (this.activityForm.get('dataSource')?.value === 'MANUAL' &&
+            type === 'BUY')
+        ) {
+          const currency =
+            this.data.accounts.find(({ id }) => {
+              return id === this.activityForm.get('accountId')?.value;
+            })?.currency ?? this.data.user.settings.baseCurrency;
+
+          this.activityForm.get('currency')?.setValue(currency);
+          this.activityForm.get('currencyOfUnitPrice')?.setValue(currency);
+
+          this.activityForm
+            .get('dataSource')
+            ?.removeValidators(Validators.required);
+          this.activityForm.get('dataSource')?.updateValueAndValidity();
+          this.activityForm.get('fee')?.setValue(0);
+          this.activityForm.get('name')?.setValidators(Validators.required);
+          this.activityForm.get('name')?.updateValueAndValidity();
+
+          if (type === 'VALUABLE') {
+            this.activityForm.get('quantity')?.setValue(1);
+          }
+
+          this.activityForm
+            .get('searchSymbol')
+            ?.removeValidators(Validators.required);
+          this.activityForm.get('searchSymbol')?.updateValueAndValidity();
+        } else if (['FEE', 'INTEREST', 'LIABILITY'].includes(type)) {
+          const currency =
+            this.data.accounts.find(({ id }) => {
+              return id === this.activityForm.get('accountId')?.value;
+            })?.currency ?? this.data.user.settings.baseCurrency;
+
+          this.activityForm.get('currency')?.setValue(currency);
+          this.activityForm.get('currencyOfUnitPrice')?.setValue(currency);
+
+          this.activityForm
+            .get('dataSource')
+            ?.removeValidators(Validators.required);
+          this.activityForm.get('dataSource')?.updateValueAndValidity();
+
+          if (['INTEREST', 'LIABILITY'].includes(type)) {
+            this.activityForm.get('fee')?.setValue(0);
+          }
+
+          this.activityForm.get('name')?.setValidators(Validators.required);
+          this.activityForm.get('name')?.updateValueAndValidity();
+
+          if (type === 'FEE') {
+            this.activityForm.get('quantity')?.setValue(0);
+          } else if (['INTEREST', 'LIABILITY'].includes(type)) {
+            this.activityForm.get('quantity')?.setValue(1);
+          }
+
+          this.activityForm
+            .get('searchSymbol')
+            ?.removeValidators(Validators.required);
+          this.activityForm.get('searchSymbol')?.updateValueAndValidity();
+
+          if (type === 'FEE') {
+            this.activityForm.get('unitPrice')?.setValue(0);
+          }
+        } else {
+          this.activityForm
+            .get('dataSource')
+            ?.setValidators(Validators.required);
+          this.activityForm.get('dataSource')?.updateValueAndValidity();
+          this.activityForm.get('name')?.removeValidators(Validators.required);
+          this.activityForm.get('name')?.updateValueAndValidity();
+          this.activityForm
+            .get('searchSymbol')
+            ?.setValidators(Validators.required);
+          this.activityForm.get('searchSymbol')?.updateValueAndValidity();
+        }
+
+        this.syncUpdateAccountBalanceControl();
+
+        this.changeDetectorRef.markForCheck();
+      });
+
+    this.activityForm.get('type')?.setValue(this.data.activity?.type);
+
+    if (this.data.activity?.id) {
+      this.activityForm.get('searchSymbol')?.disable();
+      this.activityForm.get('type')?.disable();
+    }
+
+    if (this.data.activity?.assetProfile?.symbol) {
+      this.dataService
+        .fetchSymbolItem({
+          dataSource: this.data.activity?.assetProfile?.dataSource,
+          symbol: this.data.activity?.assetProfile?.symbol
+        })
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe(({ marketPrice }) => {
+          this.currentMarketPrice = marketPrice;
+
+          this.changeDetectorRef.markForCheck();
+        });
+    }
+  }
+
+  protected applyCurrentMarketPrice() {
+    this.activityForm.patchValue({
+      currencyOfUnitPrice: this.activityForm.get('currency')?.value,
+      unitPrice: this.currentMarketPrice
+    });
+  }
+
+  protected dateFilter(aDate: Date) {
+    if (!aDate) {
+      return true;
+    }
+
+    return isAfter(aDate, new Date(0));
+  }
+
+  protected onCancel() {
+    this.dialogRef.close();
+  }
+
+  protected async onSubmit() {
+    const activity: CreateOrderDto | UpdateOrderDto = {
+      accountId: this.activityForm.get('accountId')?.value,
+      assetClass: this.activityForm.get('assetClass')?.value,
+      assetSubClass: this.activityForm.get('assetSubClass')?.value,
+      comment: getStringOrNull(this.activityForm.get('comment')?.value),
+      currency: this.activityForm.get('currency')?.value,
+      customCurrency: this.activityForm.get('currencyOfUnitPrice')?.value,
+      dataSource: ['FEE', 'INTEREST', 'LIABILITY', 'VALUABLE'].includes(
+        this.activityForm.get('type')?.value
+      )
+        ? 'MANUAL'
+        : this.activityForm.get('dataSource')?.value,
+      date: this.activityForm.get('date')?.value,
+      fee: this.activityForm.get('fee')?.value,
+      quantity: this.activityForm.get('quantity')?.value,
+      symbol:
+        (['FEE', 'INTEREST', 'LIABILITY', 'VALUABLE'].includes(
+          this.activityForm.get('type')?.value
+        )
+          ? undefined
+          : this.activityForm.get('searchSymbol')?.value?.symbol) ??
+        this.activityForm.get('name')?.value,
+      tags: this.activityForm.get('tags')?.value?.map(({ id }) => {
+        return id;
+      }),
+      type:
+        this.activityForm.get('type')?.value === 'VALUABLE'
+          ? 'BUY'
+          : this.activityForm.get('type')?.value,
+      unitPrice: this.activityForm.get('unitPrice')?.value
+    };
+
+    try {
+      if (this.mode === 'create') {
+        activity.updateAccountBalance = this.activityForm.get(
+          'updateAccountBalance'
+        )?.value;
+
+        await validateObjectForForm({
+          classDto: CreateOrderDto,
+          form: this.activityForm,
+          ignoreFields: ['dataSource', 'date'],
+          object: activity
+        });
+
+        this.dialogRef.close(activity);
+      } else {
+        const activityId = this.data.activity?.id;
+
+        if (!activityId) {
+          throw new Error('Activity ID is required for update');
+        }
+
+        (activity as UpdateOrderDto).id = activityId;
+
+        await validateObjectForForm({
+          classDto: UpdateOrderDto,
+          form: this.activityForm,
+          ignoreFields: ['dataSource', 'date'],
+          object: activity as UpdateOrderDto
+        });
+
+        this.dialogRef.close(activity as UpdateOrderDto);
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  private syncUpdateAccountBalanceControl() {
+    const accountBalanceControl = this.activityForm.get('updateAccountBalance');
+    const accountId = this.activityForm.get('accountId')?.value;
+    const dataSource = this.activityForm.get('dataSource')?.value;
+    const date = this.activityForm.get('date')?.value;
+    const type = this.activityForm.get('type')?.value;
+
+    const isEligible =
+      !!accountId &&
+      isToday(date) &&
+      !['LIABILITY', 'VALUABLE'].includes(type) &&
+      !(dataSource === 'MANUAL' && type === 'BUY');
+
+    if (isEligible) {
+      accountBalanceControl?.enable();
+    } else {
+      accountBalanceControl?.disable();
+      accountBalanceControl?.setValue(false);
+    }
+  }
+
+  private updateAssetProfile() {
+    this.isLoading = true;
+    this.changeDetectorRef.markForCheck();
+
+    this.dataService
+      .fetchSymbolItem({
+        dataSource: this.activityForm.get('searchSymbol')?.value.dataSource,
+        symbol: this.activityForm.get('searchSymbol')?.value.symbol
+      })
+      .pipe(
+        catchError(() => {
+          this.data.activity.assetProfile = null;
+
+          this.isLoading = false;
+
+          this.changeDetectorRef.markForCheck();
+
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe(({ currency, dataSource, marketPrice }) => {
+        if (this.mode === 'create') {
+          this.activityForm.get('currency')?.setValue(currency);
+          this.activityForm.get('currencyOfUnitPrice')?.setValue(currency);
+          this.activityForm.get('dataSource')?.setValue(dataSource);
+        }
+
+        this.currencyOfAssetProfile = currency;
+        this.currentMarketPrice = marketPrice;
+
+        this.isLoading = false;
+
+        this.changeDetectorRef.markForCheck();
+      });
+  }
+}

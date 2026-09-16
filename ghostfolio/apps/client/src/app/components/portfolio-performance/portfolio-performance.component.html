@@ -1,0 +1,57 @@
+<div class="container p-0">
+  <div class="no-gutters row">
+    <div class="status-container text-muted text-right">
+      @if ((errors()?.length ?? 0) > 0 && !isLoading()) {
+        <ion-icon
+          i18n-title
+          name="time-outline"
+          title="Oops! A data provider is experiencing the hiccups."
+          (click)="onShowErrors()"
+        />
+      }
+    </div>
+    @if (isLoading()) {
+      <div class="align-items-center d-flex">
+        <ngx-skeleton-loader
+          animation="pulse"
+          class="mb-2"
+          [theme]="{
+            height: '4rem',
+            width: '15rem'
+          }"
+        />
+      </div>
+    }
+    <div
+      class="display-4 font-weight-bold m-0 text-center value-container"
+      [hidden]="isLoading()"
+    >
+      <span #value id="value"></span>
+    </div>
+    <div class="currency-container flex-grow-1 px-1">
+      {{ unit() }}
+    </div>
+  </div>
+  @if (showDetails()) {
+    <div class="row">
+      <div class="d-flex col justify-content-end">
+        <gf-value
+          [colorizeSign]="true"
+          [isCurrency]="true"
+          [isLoading]="isLoading()"
+          [locale]="locale()"
+          [value]="performance()?.netPerformanceWithCurrencyEffect"
+        />
+      </div>
+      <div class="col">
+        <gf-value
+          [colorizeSign]="true"
+          [isLoading]="isLoading()"
+          [isPercent]="true"
+          [locale]="locale()"
+          [value]="performance()?.netPerformancePercentageWithCurrencyEffect"
+        />
+      </div>
+    </div>
+  }
+</div>

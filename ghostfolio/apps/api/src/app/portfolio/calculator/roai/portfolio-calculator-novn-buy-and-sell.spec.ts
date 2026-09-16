@@ -1,0 +1,267 @@
+import {
+  activityDummyData,
+  assetProfileDummyData,
+  loadExportFile,
+  userDummyData
+} from '@ghostfolio/api/app/portfolio/calculator/portfolio-calculator-test-utils';
+import { PortfolioCalculatorFactory } from '@ghostfolio/api/app/portfolio/calculator/portfolio-calculator.factory';
+import { CurrentRateService } from '@ghostfolio/api/app/portfolio/current-rate.service';
+import { CurrentRateServiceMock } from '@ghostfolio/api/app/portfolio/current-rate.service.mock';
+import { RedisCacheService } from '@ghostfolio/api/app/redis-cache/redis-cache.service';
+import { RedisCacheServiceMock } from '@ghostfolio/api/app/redis-cache/redis-cache.service.mock';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import { ExchangeRateDataService } from '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service';
+import { PortfolioSnapshotService } from '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service';
+import { PortfolioSnapshotServiceMock } from '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service.mock';
+import { parseDate } from '@ghostfolio/common/helper';
+import { Activity, ExportResponse } from '@ghostfolio/common/interfaces';
+import { PerformanceCalculationType } from '@ghostfolio/common/types/performance-calculation-type.type';
+
+import { Big } from 'big.js';
+import { join } from 'node:path';
+
+jest.mock('@ghostfolio/api/app/portfolio/current-rate.service', () => {
+  return {
+    CurrentRateService: jest.fn().mockImplementation(() => {
+      return CurrentRateServiceMock;
+    })
+  };
+});
+
+jest.mock(
+  '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service',
+  () => {
+    return {
+      PortfolioSnapshotService: jest.fn().mockImplementation(() => {
+        return PortfolioSnapshotServiceMock;
+      })
+    };
+  }
+);
+
+jest.mock('@ghostfolio/api/app/redis-cache/redis-cache.service', () => {
+  return {
+    RedisCacheService: jest.fn().mockImplementation(() => {
+      return RedisCacheServiceMock;
+    })
+  };
+});
+
+describe('PortfolioCalculator', () => {
+  let exportResponse: ExportResponse;
+
+  let configurationService: ConfigurationService;
+  let currentRateService: CurrentRateService;
+  let exchangeRateDataService: ExchangeRateDataService;
+  let portfolioCalculatorFactory: PortfolioCalculatorFactory;
+  let portfolioSnapshotService: PortfolioSnapshotService;
+  let redisCacheService: RedisCacheService;
+
+  beforeAll(() => {
+    exportResponse = loadExportFile(
+      join(
+        __dirname,
+        '../../../../../../../test/import/ok/novn-buy-and-sell.json'
+      )
+    );
+  });
+
+  beforeEach(() => {
+    PortfolioSnapshotServiceMock.reset();
+    RedisCacheServiceMock.reset();
+
+    configurationService = new ConfigurationService();
+
+    currentRateService = new CurrentRateService(null, null, null);
+
+    exchangeRateDataService = new ExchangeRateDataService(
+      null,
+      null,
+      null,
+      null
+    );
+
+    portfolioSnapshotService = new PortfolioSnapshotService(null, null);
+
+    redisCacheService = new RedisCacheService(null, null);
+
+    portfolioCalculatorFactory = new PortfolioCalculatorFactory(
+      configurationService,
+      currentRateService,
+      exchangeRateDataService,
+      portfolioSnapshotService,
+      redisCacheService
+    );
+  });
+
+  describe('get current positions', () => {
+    it.only('with NOVN.SW buy and sell', async () => {
+      jest.useFakeTimers().setSystemTime(parseDate('2022-04-11').getTime());
+
+      const activities: Activity[] = exportResponse.activities.map(
+        (activity) => ({
+          ...activityDummyData,
+          ...activity,
+          assetProfile: {
+            ...assetProfileDummyData,
+            currency: activity.currency,
+            dataSource: activity.dataSource,
+            name: 'Novartis AG',
+            symbol: activity.symbol
+          },
+          date: parseDate(activity.date),
+          feeInAssetProfileCurrency: activity.fee,
+          feeInBaseCurrency: activity.fee,
+          unitPriceInAssetProfileCurrency: activity.unitPrice
+        })
+      );
+
+      const portfolioCalculator = portfolioCalculatorFactory.createCalculator({
+        activities,
+        calculationType: PerformanceCalculationType.ROAI,
+        currency: exportResponse.user.settings.currency,
+        userId: userDummyData.id
+      });
+
+      const portfolioSnapshot = await portfolioCalculator.computeSnapshot();
+
+      const investments = portfolioCalculator.getInvestments();
+
+      const investmentsByMonth = portfolioCalculator.getInvestmentsByGroup({
+        data: portfolioSnapshot.historicalData,
+        groupBy: 'month'
+      });
+
+      const investmentsByYear = portfolioCalculator.getInvestmentsByGroup({
+        data: portfolioSnapshot.historicalData,
+        groupBy: 'year'
+      });
+
+      expect(portfolioSnapshot.historicalData[0]).toEqual({
+        date: '2022-03-06',
+        investmentValueWithCurrencyEffect: 0,
+        netPerformance: 0,
+        netPerformanceInPercentage: 0,
+        netPerformanceInPercentageWithCurrencyEffect: 0,
+        netPerformanceWithCurrencyEffect: 0,
+        netWorth: 0,
+        totalCashInBaseCurrency: 0,
+        totalInvestment: 0,
+        totalInvestmentValueWithCurrencyEffect: 0,
+        value: 0,
+        valueWithCurrencyEffect: 0
+      });
+
+      /**
+       * Closing price on 2022-03-07 is unknown and there is no earlier market
+       * price, hence it uses the unit price of the activity: 75.8
+       */
+      expect(portfolioSnapshot.historicalData[1]).toEqual({
+        date: '2022-03-07',
+        investmentValueWithCurrencyEffect: 151.6,
+        netPerformance: 0, // 2 * (75.8 - 75.8) = 0
+        netPerformanceInPercentage: 0, // 0 ÷ 151.6 = 0
+        netPerformanceInPercentageWithCurrencyEffect: 0, // 0 ÷ 151.6 = 0
+        netPerformanceWithCurrencyEffect: 0,
+        netWorth: 151.6, // 2 * 75.8 = 151.6
+        totalCashInBaseCurrency: 0,
+        totalInvestment: 151.6,
+        totalInvestmentValueWithCurrencyEffect: 151.6,
+        value: 151.6, // 2 * 75.8 = 151.6
+        valueWithCurrencyEffect: 151.6
+      });
+
+      expect(
+        portfolioSnapshot.historicalData[
+          portfolioSnapshot.historicalData.length - 1
+        ]
+      ).toEqual({
+        date: '2022-04-11',
+        investmentValueWithCurrencyEffect: 0,
+        netPerformance: 19.86,
+        netPerformanceInPercentage: 0.13100263852242744,
+        netPerformanceInPercentageWithCurrencyEffect: 0.13100263852242744,
+        netPerformanceWithCurrencyEffect: 19.86,
+        netWorth: 0,
+        totalCashInBaseCurrency: 0,
+        totalInvestment: 0,
+        totalInvestmentValueWithCurrencyEffect: 0,
+        value: 0,
+        valueWithCurrencyEffect: 0
+      });
+
+      expect(portfolioSnapshot).toMatchObject({
+        currentValueInBaseCurrency: new Big('0'),
+        errors: [],
+        hasErrors: false,
+        positions: [
+          {
+            activitiesCount: 2,
+            averagePrice: new Big('0'),
+            currency: 'CHF',
+            dataSource: 'YAHOO',
+            dateOfFirstActivity: '2022-03-07',
+            dividend: new Big('0'),
+            dividendInBaseCurrency: new Big('0'),
+            fee: new Big('0'),
+            feeInBaseCurrency: new Big('0'),
+            grossPerformance: new Big('19.86'),
+            grossPerformancePercentage: new Big('0.13100263852242744063'),
+            grossPerformancePercentageWithCurrencyEffect: new Big(
+              '0.13100263852242744063'
+            ),
+            grossPerformanceWithCurrencyEffect: new Big('19.86'),
+            investment: new Big('0'),
+            investmentWithCurrencyEffect: new Big('0'),
+            netPerformance: new Big('19.86'),
+            netPerformancePercentage: new Big('0.13100263852242744063'),
+            netPerformancePercentageWithCurrencyEffectMap: {
+              max: new Big('0.13100263852242744063')
+            },
+            netPerformanceWithCurrencyEffectMap: {
+              max: new Big('19.86')
+            },
+            marketPrice: 87.8,
+            marketPriceInBaseCurrency: 87.8,
+            quantity: new Big('0'),
+            symbol: 'NOVN.SW',
+            tags: [],
+            timeWeightedInvestment: new Big('151.6'),
+            timeWeightedInvestmentWithCurrencyEffect: new Big('151.6'),
+            valueInBaseCurrency: new Big('0')
+          }
+        ],
+        totalFeesWithCurrencyEffect: new Big('0'),
+        totalInterestWithCurrencyEffect: new Big('0'),
+        totalInvestment: new Big('0'),
+        totalInvestmentWithCurrencyEffect: new Big('0'),
+        totalLiabilitiesWithCurrencyEffect: new Big('0')
+      });
+
+      expect(portfolioSnapshot.historicalData.at(-1)).toMatchObject(
+        expect.objectContaining({
+          netPerformance: 19.86,
+          netPerformanceInPercentage: 0.13100263852242744063,
+          netPerformanceInPercentageWithCurrencyEffect: 0.13100263852242744063,
+          netPerformanceWithCurrencyEffect: 19.86,
+          totalInvestment: 0,
+          totalInvestmentValueWithCurrencyEffect: 0
+        })
+      );
+
+      expect(investments).toEqual([
+        { date: '2022-03-07', investment: new Big('151.6') },
+        { date: '2022-04-08', investment: new Big('0') }
+      ]);
+
+      expect(investmentsByMonth).toEqual([
+        { date: '2022-03-01', investment: 151.6 },
+        { date: '2022-04-01', investment: -151.6 }
+      ]);
+
+      expect(investmentsByYear).toEqual([
+        { date: '2022-01-01', investment: 0 }
+      ]);
+    });
+  });
+});

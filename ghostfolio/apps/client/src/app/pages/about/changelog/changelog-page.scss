@@ -1,0 +1,40 @@
+:host {
+  color: rgb(var(--dark-primary-text));
+  display: block;
+
+  .changelog {
+    ::ng-deep {
+      a {
+        color: rgba(var(--palette-primary-500), 1);
+        font-weight: 500;
+
+        &:hover {
+          color: rgba(var(--palette-primary-300), 1);
+        }
+      }
+
+      markdown {
+        h1,
+        p {
+          display: none;
+        }
+
+        h2 {
+          font-size: 18px;
+
+          &:not(:first-of-type) {
+            margin-top: 2rem;
+          }
+        }
+
+        h3 {
+          font-size: 15px;
+        }
+      }
+    }
+  }
+}
+
+:host-context(.theme-dark) {
+  color: rgb(var(--light-primary-text));
+}

@@ -1,0 +1,246 @@
+import { HasPermission } from '@ghostfolio/api/decorators/has-permission.decorator';
+import { HasPermissionGuard } from '@ghostfolio/api/guards/has-permission.guard';
+import { AssetProfileInvalidError } from '@ghostfolio/api/services/data-provider/errors/asset-profile-invalid.error';
+import { parseDate } from '@ghostfolio/common/helper';
+import {
+  DataProviderGhostfolioAssetProfileResponse,
+  DataProviderGhostfolioStatusResponse,
+  DividendsResponse,
+  HistoricalResponse,
+  LookupResponse,
+  MarketDataOfMarketsResponse,
+  QuotesResponse
+} from '@ghostfolio/common/interfaces';
+import { permissions } from '@ghostfolio/common/permissions';
+import { RequestWithUser } from '@ghostfolio/common/types';
+
+import {
+  Controller,
+  Get,
+  HttpException,
+  Inject,
+  Param,
+  ParseIntPipe,
+  Query,
+  UseGuards,
+  Version
+} from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import { AuthGuard } from '@nestjs/passport';
+import { isISIN } from 'class-validator';
+import { getReasonPhrase, StatusCodes } from 'http-status-codes';
+
+import { GetDividendsDto } from './get-dividends.dto';
+import { GetHistoricalDto } from './get-historical.dto';
+import { GetLookupDto } from './get-lookup.dto';
+import { GetQuotesDto } from './get-quotes.dto';
+import { GhostfolioService } from './ghostfolio.service';
+
+@Controller('data-providers/ghostfolio')
+export class GhostfolioController {
+  public constructor(
+    private readonly ghostfolioService: GhostfolioService,
+    @Inject(REQUEST) private readonly request: RequestWithUser
+  ) {}
+
+  @Get('asset-profile/:symbol')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  public async getAssetProfile(
+    @Param('symbol') symbol: string
+  ): Promise<DataProviderGhostfolioAssetProfileResponse> {
+    await this.validateDailyRequestLimit();
+
+    try {
+      const assetProfile = await this.ghostfolioService.getAssetProfile({
+        symbol
+      });
+
+      await this.ghostfolioService.incrementDailyRequests({
+        userId: this.request.user.id
+      });
+
+      return assetProfile;
+    } catch (error) {
+      if (error instanceof AssetProfileInvalidError) {
+        throw new HttpException(
+          getReasonPhrase(StatusCodes.NOT_FOUND),
+          StatusCodes.NOT_FOUND
+        );
+      }
+
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.INTERNAL_SERVER_ERROR),
+        StatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('dividends/:symbol')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  @Version('2')
+  public async getDividends(
+    @Param('symbol') symbol: string,
+    @Query() { from, granularity, to }: GetDividendsDto
+  ): Promise<DividendsResponse> {
+    await this.validateDailyRequestLimit();
+
+    try {
+      const dividends = await this.ghostfolioService.getDividends({
+        granularity,
+        symbol,
+        from: parseDate(from),
+        to: parseDate(to)
+      });
+
+      await this.ghostfolioService.incrementDailyRequests({
+        userId: this.request.user.id
+      });
+
+      return dividends;
+    } catch {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.INTERNAL_SERVER_ERROR),
+        StatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('historical/:symbol')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  @Version('2')
+  public async getHistorical(
+    @Param('symbol') symbol: string,
+    @Query() { from, granularity, to }: GetHistoricalDto
+  ): Promise<HistoricalResponse> {
+    await this.validateDailyRequestLimit();
+
+    try {
+      const historicalData = await this.ghostfolioService.getHistorical({
+        granularity,
+        symbol,
+        from: parseDate(from),
+        to: parseDate(to)
+      });
+
+      await this.ghostfolioService.incrementDailyRequests({
+        userId: this.request.user.id
+      });
+
+      return historicalData;
+    } catch {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.INTERNAL_SERVER_ERROR),
+        StatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('lookup')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  @Version('2')
+  public async lookupSymbol(
+    @Query() { includeIndices, query }: GetLookupDto
+  ): Promise<LookupResponse> {
+    await this.validateDailyRequestLimit();
+
+    try {
+      const result = await this.ghostfolioService.lookup({
+        includeIndices,
+        query: isISIN(query.toUpperCase())
+          ? query.toUpperCase()
+          : query.toLowerCase()
+      });
+
+      await this.ghostfolioService.incrementDailyRequests({
+        userId: this.request.user.id
+      });
+
+      return result;
+    } catch {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.INTERNAL_SERVER_ERROR),
+        StatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('markets')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  public async getMarketDataOfMarkets(
+    @Query('includeHistoricalData', new ParseIntPipe({ optional: true }))
+    includeHistoricalData = 0
+  ): Promise<MarketDataOfMarketsResponse> {
+    await this.validateDailyRequestLimit();
+
+    try {
+      const marketDataOfMarkets =
+        await this.ghostfolioService.getMarketDataOfMarkets({
+          includeHistoricalData
+        });
+
+      await this.ghostfolioService.incrementDailyRequests({
+        userId: this.request.user.id
+      });
+
+      return marketDataOfMarkets;
+    } catch {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.INTERNAL_SERVER_ERROR),
+        StatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('quotes')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  @Version('2')
+  public async getQuotes(
+    @Query() { symbols }: GetQuotesDto
+  ): Promise<QuotesResponse> {
+    await this.validateDailyRequestLimit();
+
+    try {
+      const quotes = await this.ghostfolioService.getQuotes({
+        symbols
+      });
+
+      await this.ghostfolioService.incrementDailyRequests({
+        userId: this.request.user.id
+      });
+
+      return quotes;
+    } catch {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.INTERNAL_SERVER_ERROR),
+        StatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('status')
+  @HasPermission(permissions.enableDataProviderGhostfolio)
+  @UseGuards(AuthGuard('api-key'), HasPermissionGuard)
+  @Version('2')
+  public async getStatus(): Promise<DataProviderGhostfolioStatusResponse> {
+    return this.ghostfolioService.getStatus({ user: this.request.user });
+  }
+
+  private async validateDailyRequestLimit() {
+    if (
+      await this.ghostfolioService.isDailyRequestLimitExceeded({
+        user: this.request.user
+      })
+    ) {
+      throw new HttpException(
+        getReasonPhrase(StatusCodes.TOO_MANY_REQUESTS),
+        StatusCodes.TOO_MANY_REQUESTS
+      );
+    }
+  }
+}

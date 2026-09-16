@@ -1,0 +1,1014 @@
+import { AdminMarketDataService } from '@ghostfolio/client/components/admin-market-data/admin-market-data.service';
+import { UserService } from '@ghostfolio/client/services/user/user.service';
+import {
+  ASSET_CLASS_MAPPING,
+  COMMENT_MAXIMUM_LENGTH,
+  PROPERTY_IS_DATA_GATHERING_ENABLED
+} from '@ghostfolio/common/config';
+import { UpdateAssetProfileDto } from '@ghostfolio/common/dtos';
+import { ConfirmationDialogType } from '@ghostfolio/common/enums';
+import {
+  canDeleteAssetProfile,
+  canMergeAssetProfile,
+  DATE_FORMAT,
+  getCountryName,
+  getCurrencyFromSymbol,
+  getDateFormatString,
+  getStringOrNull,
+  getStringOrUndefined,
+  isCurrency,
+  isSplitRatio
+} from '@ghostfolio/common/helper';
+import {
+  AdminMarketDataDetails,
+  AssetClassSelectorOption,
+  AssetProfileIdentifier,
+  LineChartItem,
+  ScraperConfiguration,
+  User
+} from '@ghostfolio/common/interfaces';
+import { DateRange } from '@ghostfolio/common/types';
+import { jsonValidator, validateObjectForForm } from '@ghostfolio/common/utils';
+import { GfCurrencySelectorComponent } from '@ghostfolio/ui/currency-selector';
+import { GfEntityLogoComponent } from '@ghostfolio/ui/entity-logo';
+import { GfHistoricalMarketDataEditorComponent } from '@ghostfolio/ui/historical-market-data-editor';
+import { translate } from '@ghostfolio/ui/i18n';
+import { GfLineChartComponent } from '@ghostfolio/ui/line-chart';
+import { NotificationService } from '@ghostfolio/ui/notifications';
+import { GfPortfolioProportionChartComponent } from '@ghostfolio/ui/portfolio-proportion-chart';
+import { AdminService, DataService } from '@ghostfolio/ui/services';
+import { GfSymbolAutocompleteComponent } from '@ghostfolio/ui/symbol-autocomplete';
+import { GfValueComponent } from '@ghostfolio/ui/value';
+
+import { TextFieldModule } from '@angular/cdk/text-field';
+import { CommonModule } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  DestroyRef,
+  ElementRef,
+  Inject,
+  OnInit,
+  ViewChild
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import {
+  AbstractControl,
+  FormBuilder,
+  FormControl,
+  FormsModule,
+  ReactiveFormsModule,
+  ValidationErrors,
+  Validators
+} from '@angular/forms';
+import { MatButtonModule } from '@angular/material/button';
+import {
+  MatCheckboxChange,
+  MatCheckboxModule
+} from '@angular/material/checkbox';
+import { MatDatepickerModule } from '@angular/material/datepicker';
+import {
+  MAT_DIALOG_DATA,
+  MatDialogModule,
+  MatDialogRef
+} from '@angular/material/dialog';
+import { MatInputModule } from '@angular/material/input';
+import { MatMenuModule } from '@angular/material/menu';
+import { MatSelectModule } from '@angular/material/select';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatTabsModule } from '@angular/material/tabs';
+import { IonIcon } from '@ionic/angular/standalone';
+import {
+  AssetClass,
+  AssetProfileSplit,
+  AssetSubClass,
+  DataGatheringFrequency,
+  DataSource,
+  MarketData,
+  Prisma,
+  SymbolProfile
+} from '@prisma/client';
+import { isUUID } from 'class-validator';
+import { format } from 'date-fns';
+import { StatusCodes } from 'http-status-codes';
+import { addIcons } from 'ionicons';
+import {
+  calendarClearOutline,
+  codeSlashOutline,
+  createOutline,
+  ellipsisVertical,
+  gitCompareOutline,
+  readerOutline,
+  serverOutline,
+  trashOutline
+} from 'ionicons/icons';
+import { isBoolean } from 'lodash';
+import ms from 'ms';
+import { EMPTY } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+
+import { AssetProfileDialogParams } from './interfaces/interfaces';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'd-flex flex-column h-100' },
+  imports: [
+    CommonModule,
+    FormsModule,
+    GfCurrencySelectorComponent,
+    GfEntityLogoComponent,
+    GfHistoricalMarketDataEditorComponent,
+    GfLineChartComponent,
+    GfPortfolioProportionChartComponent,
+    GfSymbolAutocompleteComponent,
+    GfValueComponent,
+    IonIcon,
+    MatButtonModule,
+    MatCheckboxModule,
+    MatDatepickerModule,
+    MatDialogModule,
+    MatInputModule,
+    MatMenuModule,
+    MatSelectModule,
+    MatSnackBarModule,
+    MatTabsModule,
+    ReactiveFormsModule,
+    TextFieldModule
+  ],
+  providers: [AdminMarketDataService],
+  selector: 'gf-asset-profile-dialog',
+  styleUrls: ['./asset-profile-dialog.component.scss'],
+  templateUrl: 'asset-profile-dialog.html'
+})
+export class GfAssetProfileDialogComponent implements OnInit {
+  private static readonly HISTORICAL_DATA_TEMPLATE = `date;marketPrice\n${format(
+    new Date(),
+    DATE_FORMAT
+  )};123.45`;
+
+  @ViewChild('assetProfileFormElement')
+  public readonly assetProfileFormElement: ElementRef<HTMLFormElement>;
+
+  protected assetClassLabel: string;
+  protected assetSubClassLabel: string;
+
+  protected readonly assetClassOptions: AssetClassSelectorOption[] =
+    Object.keys(AssetClass)
+      .map((id) => {
+        return { id, label: translate(id) } as AssetClassSelectorOption;
+      })
+      .sort((a, b) => {
+        return a.label.localeCompare(b.label);
+      });
+
+  protected assetSubClassOptions: AssetClassSelectorOption[] = [];
+  protected assetProfile: AdminMarketDataDetails['assetProfile'];
+
+  protected readonly assetProfileForm = this.formBuilder.group({
+    assetClass: new FormControl<AssetClass | null>(null),
+    assetSubClass: new FormControl<AssetSubClass | null>(null),
+    comment: '',
+    countries: ['', jsonValidator()],
+    currency: '',
+    dataGatheringFrequency: new FormControl<DataGatheringFrequency>('DAILY'),
+    historicalData: this.formBuilder.group({
+      csvString: ''
+    }),
+    isActive: [true],
+    name: ['', Validators.required],
+    scraperConfiguration: this.formBuilder.group<
+      Omit<ScraperConfiguration, 'headers'> & {
+        headers: FormControl<string | null>;
+      }
+    >({
+      defaultMarketPrice: undefined,
+      headers: new FormControl(JSON.stringify({}), jsonValidator()),
+      locale: '',
+      mode: 'lazy',
+      selector: '',
+      url: ''
+    }),
+    sectors: ['', jsonValidator()],
+    symbolMapping: ['', jsonValidator()],
+    url: ''
+  });
+
+  protected readonly assetProfileIdentifierForm = this.formBuilder.group(
+    {
+      assetProfileIdentifier: new FormControl<
+        AssetProfileIdentifier | { dataSource: null; symbol: null }
+      >({ dataSource: null, symbol: null }, [Validators.required])
+    },
+    {
+      validators: (control) => {
+        return this.isNewSymbolValid(control);
+      }
+    }
+  );
+
+  protected readonly assetProfileSplitForm = this.formBuilder.group(
+    {
+      date: new FormControl<Date | null>(null, Validators.required),
+      denominator: new FormControl<number | null>(null, Validators.required),
+      numerator: new FormControl<number | null>(null, Validators.required)
+    },
+    {
+      validators: (control: AbstractControl): ValidationErrors | null => {
+        const { denominator, numerator } = control.value as {
+          denominator: number;
+          numerator: number;
+        };
+
+        return isSplitRatio({ denominator, numerator })
+          ? null
+          : { invalidSplitRatio: true };
+      }
+    }
+  );
+
+  protected readonly canDeleteAssetProfile = canDeleteAssetProfile;
+  protected canEditAssetProfile = true;
+  protected readonly COMMENT_MAXIMUM_LENGTH = COMMENT_MAXIMUM_LENGTH;
+
+  protected countries: {
+    [code: string]: { name: string; value: number };
+  };
+
+  protected currencies: string[] = [];
+
+  protected readonly dataGatheringFrequencyValues: {
+    value: DataGatheringFrequency;
+    viewValue: string;
+  }[] = [
+    {
+      value: 'DAILY',
+      viewValue: $localize`Daily`
+    },
+    {
+      value: 'HOURLY',
+      viewValue: $localize`Hourly`
+    }
+  ];
+
+  protected readonly DataSource = DataSource;
+
+  protected readonly dateRangeOptions = [
+    {
+      label: $localize`Current week` + ' (' + $localize`WTD` + ')',
+      value: 'wtd'
+    },
+    {
+      label: $localize`Current month` + ' (' + $localize`MTD` + ')',
+      value: 'mtd'
+    },
+    {
+      label: $localize`Current year` + ' (' + $localize`YTD` + ')',
+      value: 'ytd'
+    },
+    {
+      label: '1 ' + $localize`year` + ' (' + $localize`1Y` + ')',
+      value: '1y'
+    },
+    {
+      label: '5 ' + $localize`years` + ' (' + $localize`5Y` + ')',
+      value: '5y'
+    },
+    {
+      label: $localize`Max`,
+      value: 'max'
+    }
+  ];
+  protected defaultDateFormat: string;
+  protected readonly getCountryName = getCountryName;
+  protected historicalDataItems: LineChartItem[];
+  protected isBenchmark = false;
+  protected isDataGatheringEnabled: boolean;
+  protected isEditAssetProfileIdentifierMode = false;
+  protected isLoading = true;
+  protected readonly isUUID = isUUID;
+  protected marketDataItems: MarketData[] = [];
+
+  protected readonly modeValues = [
+    {
+      value: 'lazy',
+      viewValue: $localize`Lazy` + ' (' + $localize`end of day` + ')'
+    },
+    {
+      value: 'instant',
+      viewValue: $localize`Instant` + ' (' + $localize`real-time` + ')'
+    }
+  ];
+
+  protected sectors: {
+    [name: string]: { name: string; value: number };
+  };
+
+  protected splits: AssetProfileSplit[] = [];
+
+  protected readonly translate = translate;
+
+  protected user: User;
+
+  private benchmarks: Partial<SymbolProfile>[];
+
+  public constructor(
+    protected adminMarketDataService: AdminMarketDataService,
+    private adminService: AdminService,
+    private changeDetectorRef: ChangeDetectorRef,
+    @Inject(MAT_DIALOG_DATA) protected data: AssetProfileDialogParams,
+    private dataService: DataService,
+    private destroyRef: DestroyRef,
+    private dialogRef: MatDialogRef<
+      GfAssetProfileDialogComponent,
+      AssetProfileIdentifier
+    >,
+    private formBuilder: FormBuilder,
+    private notificationService: NotificationService,
+    private snackBar: MatSnackBar,
+    private userService: UserService
+  ) {
+    addIcons({
+      calendarClearOutline,
+      codeSlashOutline,
+      createOutline,
+      ellipsisVertical,
+      gitCompareOutline,
+      readerOutline,
+      serverOutline,
+      trashOutline
+    });
+  }
+
+  protected get canSaveAssetProfileIdentifier() {
+    return !this.assetProfileForm.dirty && this.canEditAssetProfile;
+  }
+
+  public ngOnInit() {
+    const { benchmarks, currencies } = this.dataService.fetchInfo();
+
+    this.benchmarks = benchmarks;
+    this.currencies = currencies;
+    this.defaultDateFormat = getDateFormatString(this.data.locale);
+
+    this.initialize();
+  }
+
+  protected initialize() {
+    this.historicalDataItems = [];
+
+    this.adminService
+      .fetchAdminData()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(({ settings }) => {
+        this.isDataGatheringEnabled =
+          settings[PROPERTY_IS_DATA_GATHERING_ENABLED] === false ? false : true;
+
+        this.changeDetectorRef.markForCheck();
+      });
+
+    this.userService.stateChanged
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((state) => {
+        if (state?.user) {
+          this.user = state.user;
+        }
+      });
+
+    this.assetProfileForm.controls.assetClass.valueChanges
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((assetClass) => {
+        if (!assetClass) {
+          return;
+        }
+
+        const assetSubClasses = ASSET_CLASS_MAPPING.get(assetClass) ?? [];
+
+        this.assetSubClassOptions = assetSubClasses
+          .map((assetSubClass) => {
+            return {
+              id: assetSubClass,
+              label: translate(assetSubClass)
+            };
+          })
+          .sort((a, b) => a.label.localeCompare(b.label));
+
+        this.assetProfileForm.controls.assetSubClass.setValue(null);
+
+        this.changeDetectorRef.markForCheck();
+      });
+
+    this.dataService
+      .fetchMarketDataBySymbol({
+        dataSource: this.data.dataSource,
+        symbol: this.data.symbol
+      })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(({ assetProfile, marketData, splits }) => {
+        this.assetProfile = assetProfile;
+        this.splits = splits ?? [];
+
+        this.assetClassLabel = translate(this.assetProfile?.assetClass ?? '');
+        this.assetSubClassLabel = translate(
+          this.assetProfile?.assetSubClass ?? ''
+        );
+
+        this.canEditAssetProfile = !isCurrency(
+          getCurrencyFromSymbol(this.data.symbol)
+        );
+
+        this.countries = {};
+
+        this.isBenchmark = this.benchmarks.some(({ id }) => {
+          return id === this.assetProfile.id;
+        });
+
+        this.historicalDataItems = marketData.map(({ date, marketPrice }) => {
+          return {
+            date: format(date, DATE_FORMAT),
+            value: marketPrice
+          };
+        });
+
+        this.marketDataItems = marketData;
+        this.sectors = {};
+
+        if (
+          this.assetProfile?.countries &&
+          this.assetProfile.countries.length > 0
+        ) {
+          for (const { code, weight } of this.assetProfile.countries) {
+            this.countries[code] = {
+              name: getCountryName({ code }),
+              value: weight
+            };
+          }
+        }
+
+        if (
+          this.assetProfile?.sectors &&
+          this.assetProfile.sectors.length > 0
+        ) {
+          for (const { name, weight } of this.assetProfile.sectors) {
+            this.sectors[name] = {
+              name: translate(name),
+              value: weight
+            };
+          }
+        }
+
+        this.assetProfileForm.setValue({
+          assetClass: this.assetProfile.assetClass ?? null,
+          assetSubClass: this.assetProfile.assetSubClass ?? null,
+          comment: this.assetProfile?.comment ?? '',
+          countries: JSON.stringify(
+            this.assetProfile?.countries?.map(({ code, weight }) => {
+              return { code, weight };
+            }) ?? []
+          ),
+          currency: this.assetProfile?.currency ?? null,
+          dataGatheringFrequency:
+            this.assetProfile?.dataGatheringFrequency ?? 'DAILY',
+          historicalData: {
+            csvString: GfAssetProfileDialogComponent.HISTORICAL_DATA_TEMPLATE
+          },
+          isActive: isBoolean(this.assetProfile?.isActive)
+            ? this.assetProfile.isActive
+            : null,
+          name: this.assetProfile.name ?? this.assetProfile.symbol ?? null,
+          scraperConfiguration: {
+            defaultMarketPrice:
+              this.assetProfile?.scraperConfiguration?.defaultMarketPrice ??
+              null,
+            headers: JSON.stringify(
+              this.assetProfile?.scraperConfiguration?.headers ?? {}
+            ),
+            locale: this.assetProfile?.scraperConfiguration?.locale ?? '',
+            mode: this.assetProfile?.scraperConfiguration?.mode ?? 'lazy',
+            selector: this.assetProfile?.scraperConfiguration?.selector ?? '',
+            url: this.assetProfile?.scraperConfiguration?.url ?? ''
+          },
+          sectors: JSON.stringify(this.assetProfile?.sectors ?? []),
+          symbolMapping: JSON.stringify(this.assetProfile?.symbolMapping ?? {}),
+          url: this.assetProfile?.url ?? ''
+        });
+
+        if (!this.canEditAssetProfile) {
+          this.assetProfileForm.disable();
+        }
+
+        this.assetProfileForm.markAsPristine();
+
+        this.isLoading = false;
+
+        this.changeDetectorRef.markForCheck();
+      });
+  }
+
+  protected onCancelEditAssetProfileIdentifierMode() {
+    this.isEditAssetProfileIdentifierMode = false;
+
+    if (this.canEditAssetProfile) {
+      this.assetProfileForm.enable();
+    }
+
+    this.assetProfileIdentifierForm.reset();
+  }
+
+  protected onClose() {
+    this.dialogRef.close();
+  }
+
+  protected onConvertToManualDataSource() {
+    this.patchAssetProfileIdentifier({
+      getErrorMessage: () => {
+        return (
+          '😞 ' +
+          $localize`An error occurred while converting the data source to ${DataSource.MANUAL}.`
+        );
+      },
+      title: $localize`Do you really want to convert the data source to ${DataSource.MANUAL}?`,
+      updateAssetProfileDto: { dataSource: DataSource.MANUAL }
+    });
+  }
+
+  protected onDeleteProfileData({
+    dataSource,
+    symbol
+  }: AssetProfileIdentifier) {
+    this.adminMarketDataService
+      .deleteAssetProfile({ dataSource, symbol })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.dialogRef.close();
+      });
+  }
+
+  protected onGatherProfileDataBySymbol({
+    dataSource,
+    symbol
+  }: AssetProfileIdentifier) {
+    this.adminService
+      .gatherProfileDataBySymbol({ dataSource, symbol })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe();
+  }
+
+  protected onGatherSymbol({
+    dataSource,
+    range,
+    symbol
+  }: {
+    range?: DateRange;
+  } & AssetProfileIdentifier) {
+    this.adminService
+      .gatherSymbol({ dataSource, range, symbol })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe();
+  }
+
+  protected onAddSplit() {
+    const { date, denominator, numerator } =
+      this.assetProfileSplitForm.getRawValue();
+
+    if (!date || !denominator || !numerator) {
+      return;
+    }
+
+    this.adminService
+      .postAssetProfileSplit({
+        dataSource: this.data.dataSource,
+        split: {
+          denominator,
+          numerator,
+          date: format(date, DATE_FORMAT)
+        },
+        symbol: this.data.symbol
+      })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.assetProfileSplitForm.reset();
+
+        this.initialize();
+      });
+  }
+
+  protected onDeleteSplit(aId: string) {
+    this.adminService
+      .deleteAssetProfileSplit({
+        dataSource: this.data.dataSource,
+        id: aId,
+        symbol: this.data.symbol
+      })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.initialize();
+      });
+  }
+
+  protected onMarketDataChanged(withRefresh: boolean = false) {
+    if (withRefresh) {
+      this.initialize();
+    }
+  }
+
+  protected onSetBenchmark({ dataSource, symbol }: AssetProfileIdentifier) {
+    this.dataService
+      .postBenchmark({ dataSource, symbol })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.dataService.updateInfo();
+
+        this.isBenchmark = true;
+
+        this.changeDetectorRef.markForCheck();
+      });
+  }
+
+  protected onSetEditAssetProfileIdentifierMode() {
+    this.isEditAssetProfileIdentifierMode = true;
+
+    this.assetProfileForm.disable();
+  }
+
+  protected async onSubmitAssetProfileForm() {
+    let countries: Prisma.InputJsonArray = [];
+    let scraperConfiguration: Prisma.InputJsonObject | undefined = {
+      selector: '',
+      url: ''
+    };
+    let sectors: Prisma.InputJsonArray = [];
+    let symbolMapping: Record<string, string> = {};
+
+    try {
+      countries = JSON.parse(
+        this.assetProfileForm.controls.countries.value ?? '[]'
+      ) as Prisma.InputJsonArray;
+    } catch {}
+
+    try {
+      scraperConfiguration = {
+        defaultMarketPrice:
+          this.assetProfileForm.controls.scraperConfiguration.controls
+            .defaultMarketPrice?.value ?? undefined,
+        headers: JSON.parse(
+          this.assetProfileForm.controls.scraperConfiguration.controls.headers
+            .value ?? '{}'
+        ) as Record<string, string>,
+        locale: getStringOrUndefined(
+          this.assetProfileForm.controls.scraperConfiguration.controls.locale
+            ?.value
+        ),
+        mode:
+          this.assetProfileForm.controls.scraperConfiguration.controls.mode
+            ?.value ?? undefined,
+        selector:
+          this.assetProfileForm.controls.scraperConfiguration.controls.selector
+            .value ?? '',
+        url:
+          this.assetProfileForm.controls.scraperConfiguration.controls.url
+            .value ?? ''
+      };
+
+      if (!scraperConfiguration.selector || !scraperConfiguration.url) {
+        scraperConfiguration = undefined;
+      }
+    } catch (error) {
+      console.error($localize`Could not parse scraper configuration`, error);
+
+      this.snackBar.open(
+        '😞 ' + $localize`Could not parse scraper configuration`,
+        undefined,
+        {
+          duration: ms('3 seconds')
+        }
+      );
+
+      return;
+    }
+
+    try {
+      sectors = JSON.parse(
+        this.assetProfileForm.controls.sectors.value ?? '[]'
+      ) as Prisma.InputJsonArray;
+    } catch {}
+
+    try {
+      symbolMapping = JSON.parse(
+        this.assetProfileForm.controls.symbolMapping.value ?? '{}'
+      ) as Record<string, string>;
+    } catch {}
+
+    const assetProfile: UpdateAssetProfileDto = {
+      countries,
+      scraperConfiguration,
+      sectors,
+      symbolMapping,
+      assetClass: this.assetProfileForm.controls.assetClass.value ?? undefined,
+      assetSubClass:
+        this.assetProfileForm.controls.assetSubClass.value ?? undefined,
+      comment: getStringOrNull(this.assetProfileForm.controls.comment.value),
+      currency: this.assetProfileForm.controls.currency.value ?? undefined,
+      dataGatheringFrequency:
+        this.assetProfileForm.controls.dataGatheringFrequency.value ??
+        undefined,
+      isActive: isBoolean(this.assetProfileForm.controls.isActive.value)
+        ? this.assetProfileForm.controls.isActive.value
+        : undefined,
+      name: this.assetProfileForm.controls.name.value ?? undefined,
+      url: getStringOrNull(this.assetProfileForm.controls.url.value)
+    };
+
+    try {
+      await validateObjectForForm({
+        classDto: UpdateAssetProfileDto,
+        form: this.assetProfileForm,
+        object: assetProfile
+      });
+    } catch (error) {
+      console.error($localize`Could not validate form`, error);
+
+      this.snackBar.open(
+        '😞 ' + $localize`Could not validate form`,
+        undefined,
+        {
+          duration: ms('3 seconds')
+        }
+      );
+
+      return;
+    }
+
+    this.adminService
+      .patchAssetProfile(
+        {
+          dataSource: this.data.dataSource,
+          symbol: this.data.symbol
+        },
+        assetProfile
+      )
+      .subscribe({
+        next: () => {
+          this.snackBar.open(
+            '✅ ' + $localize`Asset profile has been saved`,
+            undefined,
+            {
+              duration: ms('3 seconds')
+            }
+          );
+
+          this.initialize();
+        },
+        error: (error: HttpErrorResponse) => {
+          console.error($localize`Could not save asset profile`, error);
+
+          this.snackBar.open(
+            '😞 ' + $localize`Could not save asset profile`,
+            undefined,
+            {
+              duration: ms('3 seconds')
+            }
+          );
+        }
+      });
+  }
+
+  protected async onSubmitAssetProfileIdentifierForm() {
+    const newAssetProfileIdentifier =
+      this.assetProfileIdentifierForm.controls.assetProfileIdentifier.value;
+
+    if (!newAssetProfileIdentifier?.dataSource) {
+      return;
+    }
+
+    const assetProfileIdentifier: UpdateAssetProfileDto = {
+      dataSource: newAssetProfileIdentifier.dataSource,
+      symbol: newAssetProfileIdentifier.symbol
+    };
+
+    try {
+      await validateObjectForForm({
+        classDto: UpdateAssetProfileDto,
+        form: this.assetProfileIdentifierForm,
+        object: assetProfileIdentifier
+      });
+    } catch (error) {
+      console.error(error);
+
+      return;
+    }
+
+    this.patchAssetProfileIdentifier({
+      conflictFn: this.user?.settings?.isExperimentalFeatures
+        ? () => {
+            this.mergeAssetProfile(newAssetProfileIdentifier);
+          }
+        : undefined,
+      getErrorMessage: () => {
+        return $localize`An error occurred while updating to ${assetProfileIdentifier.symbol} (${assetProfileIdentifier.dataSource}).`;
+      },
+      title: $localize`Do you really want to convert this asset profile to ${newAssetProfileIdentifier.symbol} (${newAssetProfileIdentifier.dataSource})?`,
+      updateAssetProfileDto: assetProfileIdentifier
+    });
+  }
+
+  protected onTestMarketData() {
+    this.adminService
+      .testMarketData({
+        dataSource: this.data.dataSource,
+        scraperConfiguration: {
+          defaultMarketPrice:
+            this.assetProfileForm.controls.scraperConfiguration.controls
+              .defaultMarketPrice?.value,
+          headers: JSON.parse(
+            this.assetProfileForm.controls.scraperConfiguration.controls.headers
+              .value ?? '{}'
+          ) as Record<string, string>,
+          locale: getStringOrUndefined(
+            this.assetProfileForm.controls.scraperConfiguration.controls.locale
+              ?.value
+          ),
+          mode: this.assetProfileForm.controls.scraperConfiguration.controls
+            .mode?.value,
+          selector:
+            this.assetProfileForm.controls.scraperConfiguration.controls
+              .selector.value,
+          url: this.assetProfileForm.controls.scraperConfiguration.controls.url
+            .value
+        },
+        symbol: this.data.symbol
+      })
+      .pipe(
+        catchError(({ error }: HttpErrorResponse) => {
+          this.notificationService.alert({
+            message: error?.message,
+            title: $localize`Error`
+          });
+          return EMPTY;
+        }),
+        takeUntilDestroyed(this.destroyRef)
+      )
+      .subscribe(({ price }) => {
+        const currency = this.assetProfileForm.controls.currency.value;
+
+        this.notificationService.alert({
+          title: `${$localize`The current market price is`} ${price}${
+            currency ? ` ${currency}` : ''
+          }`
+        });
+      });
+  }
+
+  protected onToggleIsActive({ checked }: MatCheckboxChange) {
+    if (checked) {
+      this.assetProfileForm.controls.isActive.setValue(true);
+    } else {
+      this.assetProfileForm.controls.isActive.setValue(false);
+    }
+
+    if (checked === this.assetProfile.isActive) {
+      this.assetProfileForm.controls.isActive.markAsPristine();
+    } else {
+      this.assetProfileForm.controls.isActive.markAsDirty();
+    }
+  }
+
+  protected onUnsetBenchmark({ dataSource, symbol }: AssetProfileIdentifier) {
+    this.dataService
+      .deleteBenchmark({ dataSource, symbol })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.dataService.updateInfo();
+
+        this.isBenchmark = false;
+
+        this.changeDetectorRef.markForCheck();
+      });
+  }
+
+  protected onTriggerSubmitAssetProfileForm() {
+    if (this.assetProfileForm.valid) {
+      this.onSubmitAssetProfileForm();
+    }
+  }
+
+  private isNewSymbolValid(control: AbstractControl): ValidationErrors | null {
+    const currentAssetProfileIdentifier: AssetProfileIdentifier | undefined =
+      control.get('assetProfileIdentifier')?.value;
+
+    if (
+      currentAssetProfileIdentifier?.dataSource === this.data?.dataSource &&
+      currentAssetProfileIdentifier?.symbol === this.data?.symbol
+    ) {
+      return {
+        equalsPreviousProfileIdentifier: true
+      };
+    }
+
+    return null;
+  }
+
+  private mergeAssetProfile({ dataSource, symbol }: AssetProfileIdentifier) {
+    if (
+      !canMergeAssetProfile({
+        isBenchmark: this.isBenchmark,
+        splitsCount: this.splits.length,
+        symbol: this.data.symbol
+      }) ||
+      !canMergeAssetProfile({ symbol })
+    ) {
+      this.notificationService.alert({
+        message: $localize`This asset profile cannot be merged into ${symbol} (${dataSource}).`,
+        title: $localize`Error`
+      });
+
+      return;
+    }
+
+    this.notificationService.confirm({
+      confirmFn: () => {
+        this.adminService
+          .mergeAssetProfile(
+            {
+              dataSource: this.data.dataSource,
+              symbol: this.data.symbol
+            },
+            { dataSource, symbol }
+          )
+          .pipe(
+            catchError(({ error }: HttpErrorResponse) => {
+              this.notificationService.alert({
+                message:
+                  error?.message ??
+                  $localize`An error occurred while merging this asset profile into ${symbol} (${dataSource}).`,
+                title: $localize`Error`
+              });
+
+              return EMPTY;
+            }),
+            takeUntilDestroyed(this.destroyRef)
+          )
+          .subscribe((mergedAssetProfile) => {
+            this.dialogRef.close({
+              dataSource: mergedAssetProfile.dataSource,
+              symbol: mergedAssetProfile.symbol
+            });
+          });
+      },
+      confirmType: ConfirmationDialogType.Warn,
+      message:
+        $localize`The data of this asset profile is moved to ${symbol} (${dataSource}) and this asset profile is deleted.` +
+        ' ' +
+        $localize`This action cannot be undone.`,
+      title:
+        $localize`${symbol} (${dataSource}) is already in use.` +
+        ' ' +
+        $localize`Do you really want to merge this asset profile into it?`
+    });
+  }
+
+  private patchAssetProfileIdentifier({
+    conflictFn,
+    getErrorMessage,
+    title,
+    updateAssetProfileDto
+  }: {
+    conflictFn?: () => void;
+    getErrorMessage: (error: HttpErrorResponse) => string;
+    title: string;
+    updateAssetProfileDto: UpdateAssetProfileDto;
+  }) {
+    this.notificationService.confirm({
+      title,
+      confirmFn: () => {
+        this.adminService
+          .patchAssetProfile(
+            {
+              dataSource: this.data.dataSource,
+              symbol: this.data.symbol
+            },
+            updateAssetProfileDto
+          )
+          .pipe(
+            catchError((error: HttpErrorResponse) => {
+              if (error.status === StatusCodes.CONFLICT && conflictFn) {
+                conflictFn();
+              } else {
+                this.snackBar.open(getErrorMessage(error), undefined, {
+                  duration: ms('3 seconds')
+                });
+              }
+
+              return EMPTY;
+            }),
+            takeUntilDestroyed(this.destroyRef)
+          )
+          .subscribe(({ dataSource, symbol }) => {
+            this.dialogRef.close({ dataSource, symbol });
+          });
+      },
+      confirmType: ConfirmationDialogType.Primary
+    });
+  }
+}

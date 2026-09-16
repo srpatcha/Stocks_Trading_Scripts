@@ -1,0 +1,392 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <gf-activities-filter
+        [allFilters]="allFilters"
+        [isLoading]="isLoading"
+        [placeholder]="placeholder"
+        (valueChanged)="filters$.next($event)"
+      />
+    </div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <div class="overflow-x-auto">
+        <table
+          class="gf-table w-100"
+          mat-table
+          matSort
+          matSortActive="symbol"
+          matSortDirection="asc"
+          [dataSource]="dataSource"
+        >
+          <ng-container matColumnDef="status">
+            <th
+              *matHeaderCellDef
+              class="d-none d-lg-table-cell px-1"
+              mat-header-cell
+            ></th>
+            <td
+              *matCellDef="let element"
+              class="d-none d-lg-table-cell px-1"
+              mat-cell
+            >
+              @if (!element.isActive) {
+                <div
+                  class="d-flex justify-content-center"
+                  i18n-title
+                  title="Data Gathering is off"
+                >
+                  <ion-icon name="ban-outline" />
+                </div>
+              }
+            </td>
+            <td
+              *matFooterCellDef
+              class="d-none d-lg-table-cell px-1"
+              mat-footer-cell
+            ></td>
+          </ng-container>
+
+          <ng-container matColumnDef="select">
+            <th *matHeaderCellDef class="px-1" mat-header-cell></th>
+            <td *matCellDef="let element" class="px-1" mat-cell>
+              @if (
+                canDeleteAssetProfile({
+                  activitiesCount: element.activitiesCount,
+                  isBenchmark: element.isBenchmark,
+                  symbol: element.symbol,
+                  watchedByCount: element.watchedByCount
+                })
+              ) {
+                <mat-checkbox
+                  color="primary"
+                  [checked]="selection.isSelected(element)"
+                  (change)="$event ? selection.toggle(element) : null"
+                  (click)="$event.stopPropagation()"
+                />
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="symbol">
+            <th *matHeaderCellDef class="px-1" mat-header-cell mat-sort-header>
+              <ng-container i18n>Symbol</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1" mat-cell>
+              {{ element.symbol }}
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="nameWithSymbol">
+            <th
+              *matHeaderCellDef
+              class="px-1"
+              mat-header-cell
+              mat-sort-header="symbol"
+            >
+              <ng-container i18n>Name</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="line-height-normal px-1"
+              mat-cell
+            >
+              <div class="text-truncate">{{ element.name }}</div>
+              @if (!isUUID(element.symbol)) {
+                <div>
+                  <small class="text-muted">{{ element.symbol }}</small>
+                </div>
+              }
+            </td>
+            <td *matFooterCellDef class="px-1" mat-footer-cell></td>
+          </ng-container>
+
+          <ng-container matColumnDef="dataSource">
+            <th *matHeaderCellDef class="px-1" mat-header-cell mat-sort-header>
+              <ng-container i18n>Data Source</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="line-height-normal px-1 text-nowrap"
+              mat-cell
+            >
+              <div>
+                {{ element.dataProviderInfo?.name ?? element.dataSource }}
+              </div>
+              @if (element.dataProviderInfo?.name) {
+                <div>
+                  <small class="text-muted">{{ element.dataSource }}</small>
+                </div>
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="assetClass">
+            <th *matHeaderCellDef class="px-1" mat-header-cell mat-sort-header>
+              <ng-container i18n>Asset Class</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="line-height-normal px-1 text-nowrap"
+              mat-cell
+            >
+              <div>{{ translate(element.assetClass) }}</div>
+              @if (element.assetClass) {
+                <div>
+                  <small class="text-muted">{{ element.assetClass }}</small>
+                </div>
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="assetSubClass">
+            <th *matHeaderCellDef class="px-1" mat-header-cell mat-sort-header>
+              <ng-container i18n>Asset Sub Class</ng-container>
+            </th>
+            <td
+              *matCellDef="let element"
+              class="line-height-normal px-1 text-nowrap"
+              mat-cell
+            >
+              <div>{{ translate(element.assetSubClass) }}</div>
+              @if (element.assetSubClass) {
+                <div>
+                  <small class="text-muted">{{ element.assetSubClass }}</small>
+                </div>
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="lastMarketPrice">
+            <th *matHeaderCellDef class="px-1" mat-header-cell>
+              <ng-container i18n>Market Price</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1" mat-cell>
+              <div class="d-flex justify-content-end">
+                <gf-value
+                  [isCurrency]="true"
+                  [locale]="user?.settings?.locale"
+                  [value]="element.lastMarketPrice ?? ''"
+                />
+              </div>
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="date">
+            <th *matHeaderCellDef class="px-1" mat-header-cell>
+              <ng-container i18n>First Activity</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1" mat-cell>
+              @if (element.date) {
+                <gf-value
+                  [isDate]="true"
+                  [locale]="user?.settings?.locale"
+                  [value]="element.date"
+                />
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="activitiesCount">
+            <th *matHeaderCellDef class="px-1" mat-header-cell mat-sort-header>
+              <ng-container i18n>Activities Count</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1 text-right" mat-cell>
+              {{ element.activitiesCount }}
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="marketDataItemCount">
+            <th *matHeaderCellDef class="px-1" mat-header-cell>
+              <ng-container i18n>Historical Data</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1 text-right" mat-cell>
+              {{ element.marketDataItemCount }}
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="sectorsCount">
+            <th *matHeaderCellDef class="px-1" mat-header-cell>
+              <ng-container i18n>Sectors Count</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1 text-right" mat-cell>
+              {{ element.sectorsCount }}
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="countriesCount">
+            <th *matHeaderCellDef class="px-1" mat-header-cell>
+              <ng-container i18n>Countries Count</ng-container>
+            </th>
+            <td *matCellDef="let element" class="px-1 text-right" mat-cell>
+              {{ element.countriesCount }}
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="isUsedByUsersWithSubscription">
+            <th *matHeaderCellDef class="px-1" mat-header-cell></th>
+            <td *matCellDef="let element" class="px-1" mat-cell>
+              @if (element.isUsedByUsersWithSubscription) {
+                <gf-premium-indicator [enableLink]="false" />
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="comment">
+            <th *matHeaderCellDef class="px-1" mat-header-cell></th>
+            <td *matCellDef="let element" class="px-1" mat-cell>
+              @if (element.comment) {
+                <ion-icon class="d-block" name="document-text-outline" />
+              }
+            </td>
+          </ng-container>
+
+          <ng-container matColumnDef="actions" stickyEnd>
+            <th *matHeaderCellDef class="px-1 text-right" mat-header-cell>
+              <button
+                class="mx-1 no-min-width px-2"
+                mat-button
+                [matMenuTriggerFor]="assetProfilesActionsMenu"
+                (click)="$event.stopPropagation()"
+              >
+                <ion-icon name="ellipsis-vertical" />
+              </button>
+              <mat-menu
+                #assetProfilesActionsMenu="matMenu"
+                class="no-max-width"
+                xPosition="before"
+              >
+                <button mat-menu-item (click)="onGatherRecentMarketData()">
+                  <ng-container i18n
+                    >Gather Recent Historical Market Data</ng-container
+                  >
+                </button>
+                <button mat-menu-item (click)="onGatherMax()">
+                  <ng-container i18n
+                    >Gather All Historical Market Data</ng-container
+                  >
+                </button>
+                <button mat-menu-item (click)="onGatherProfileData()">
+                  <ng-container i18n>Gather Profile Data</ng-container>
+                </button>
+                <hr class="m-0" />
+                <button
+                  mat-menu-item
+                  [disabled]="!selection.hasValue()"
+                  (click)="onDeleteAssetProfiles()"
+                >
+                  <ng-container i18n
+                    >Delete
+                    {{
+                      selection.selected.length > 1
+                        ? selection.selected.length
+                        : ''
+                    }}
+                    {selection.selected.length, plural,
+                      =1 {Profile}
+                      other {Profiles}
+                    }</ng-container
+                  >
+                </button>
+              </mat-menu>
+            </th>
+            <td *matCellDef="let element" class="px-1 text-right" mat-cell>
+              <button
+                class="mx-1 no-min-width px-2"
+                mat-button
+                [matMenuTriggerFor]="assetProfileActionsMenu"
+                (click)="$event.stopPropagation()"
+              >
+                <ion-icon name="ellipsis-horizontal" />
+              </button>
+              <mat-menu #assetProfileActionsMenu="matMenu" xPosition="before">
+                <a
+                  mat-menu-item
+                  [routerLink]="
+                    internalRoutes.adminControl.subRoutes.marketData.subRoutes.update.routerLink(
+                      element.dataSource,
+                      element.symbol
+                    )
+                  "
+                >
+                  <span class="align-items-center d-flex">
+                    <ion-icon class="mr-2" name="create-outline" />
+                    <span><ng-container i18n>Edit</ng-container>...</span>
+                  </span>
+                </a>
+                <hr class="m-0" />
+                <button
+                  mat-menu-item
+                  [disabled]="
+                    !canDeleteAssetProfile({
+                      activitiesCount: element.activitiesCount,
+                      isBenchmark: element.isBenchmark,
+                      symbol: element.symbol,
+                      watchedByCount: element.watchedByCount
+                    })
+                  "
+                  (click)="
+                    onDeleteAssetProfile({
+                      dataSource: element.dataSource,
+                      symbol: element.symbol
+                    })
+                  "
+                >
+                  <span class="align-items-center d-flex">
+                    <ion-icon class="mr-2" name="trash-outline" />
+                    <span i18n>Delete</span>
+                  </span>
+                </button>
+              </mat-menu>
+            </td>
+          </ng-container>
+
+          <tr *matHeaderRowDef="displayedColumns" mat-header-row></tr>
+          <tr
+            *matRowDef="let row; columns: displayedColumns"
+            class="cursor-pointer"
+            mat-row
+            (click)="
+              onOpenAssetProfileDialog({
+                dataSource: row.dataSource,
+                symbol: row.symbol
+              })
+            "
+          ></tr>
+        </table>
+      </div>
+
+      <mat-paginator
+        [class.d-none]="
+          (isLoading && totalItems === 0) || totalItems <= pageSize
+        "
+        [hidePageSize]="true"
+        [length]="totalItems"
+        [pageSize]="pageSize"
+        [showFirstLastButtons]="true"
+        (page)="onChangePage($event)"
+      />
+
+      @if (isLoading && totalItems === 0) {
+        <ngx-skeleton-loader
+          animation="pulse"
+          class="px-4 py-3"
+          [theme]="{
+            height: '1.5rem',
+            width: '100%'
+          }"
+        />
+      }
+    </div>
+  </div>
+
+  <gf-fab
+    [routerLink]="
+      internalRoutes.adminControl.subRoutes.marketData.subRoutes.create
+        .routerLink
+    "
+  />
+</div>
+
+<router-outlet />

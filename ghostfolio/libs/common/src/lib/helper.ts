@@ -1,0 +1,811 @@
+import { utc } from '@date-fns/utc';
+import { NumberParser } from '@internationalized/number';
+import {
+  AccessType,
+  Type as ActivityType,
+  AssetProfileOverrides,
+  AssetSubClass,
+  MarketData,
+  Prisma,
+  SymbolProfile
+} from '@prisma/client';
+import { Big } from 'big.js';
+import { isISO4217CurrencyCode, isUUID } from 'class-validator';
+import {
+  getDate,
+  getMonth,
+  getYear,
+  isAfter,
+  isMatch,
+  isValid,
+  parse,
+  parseISO,
+  subDays
+} from 'date-fns';
+import {
+  ca,
+  de,
+  es,
+  fr,
+  it,
+  ja,
+  ko,
+  nl,
+  pl,
+  pt,
+  tr,
+  uk,
+  zhCN
+} from 'date-fns/locale';
+import { get, isNil, isString } from 'lodash';
+
+import {
+  DEFAULT_CURRENCY,
+  DEFAULT_LOCALE,
+  DERIVED_CURRENCIES,
+  ghostfolioFearAndGreedIndexSymbolCryptocurrencies,
+  ghostfolioFearAndGreedIndexSymbolStocks,
+  ghostfolioPrefix,
+  SEARCH_QUERY_MINIMUM_LENGTH,
+  TAG_ID_DRAFT,
+  TAG_ID_EXCLUDE_FROM_ANALYSIS,
+  TAG_IDS_SYSTEM
+} from './config';
+import {
+  AssetProfileIdentifier,
+  AssetProfileItem,
+  Benchmark,
+  PortfolioPosition,
+  UserSettings
+} from './interfaces';
+import { BenchmarkTrend, ColorScheme } from './types';
+
+export const DATE_FORMAT = 'yyyy-MM-dd';
+export const DATE_FORMAT_MONTHLY = 'MMMM yyyy';
+export const DATE_FORMAT_YEARLY = 'yyyy';
+
+// Settings which describe the person looking at the screen rather than the
+// portfolio being looked at. They stay with the authenticated user while
+// impersonating. Every other setting follows the impersonated user.
+// The filters are included because they are always written back to the
+// authenticated user, so reading them from the impersonated user would
+// overwrite the filters of the authenticated user.
+const USER_SETTINGS_KEYS_OF_AUTHENTICATED_USER: (keyof UserSettings)[] = [
+  'benchmark',
+  'colorScheme',
+  'dateRange',
+  'filters.accounts',
+  'filters.assetClasses',
+  'filters.dataSource',
+  'filters.symbol',
+  'filters.tags',
+  'holdingsViewMode',
+  'isExperimentalFeatures',
+  'isRestrictedView',
+  'language',
+  'locale',
+  'viewMode'
+];
+
+export function applyAssetProfileOverrides<T extends Partial<SymbolProfile>>(
+  assetProfile: T,
+  assetProfileOverrides: AssetProfileOverrides | null
+): T {
+  if (!assetProfileOverrides) {
+    return assetProfile;
+  }
+
+  const assetProfileWithOverrides = { ...assetProfile } as T;
+
+  assetProfileWithOverrides.assetClass =
+    assetProfileOverrides.assetClass ?? assetProfile.assetClass;
+
+  assetProfileWithOverrides.assetSubClass =
+    assetProfileOverrides.assetSubClass ?? assetProfile.assetSubClass;
+
+  if ((assetProfileOverrides.countries as Prisma.JsonArray)?.length > 0) {
+    assetProfileWithOverrides.countries = assetProfileOverrides.countries;
+  }
+
+  if ((assetProfileOverrides.holdings as Prisma.JsonArray)?.length > 0) {
+    assetProfileWithOverrides.holdings = assetProfileOverrides.holdings;
+  }
+
+  assetProfileWithOverrides.name =
+    assetProfileOverrides.name ?? assetProfile.name;
+
+  if ((assetProfileOverrides.sectors as Prisma.JsonArray)?.length > 0) {
+    assetProfileWithOverrides.sectors = assetProfileOverrides.sectors;
+  }
+
+  assetProfileWithOverrides.url = assetProfileOverrides.url ?? assetProfile.url;
+
+  return assetProfileWithOverrides;
+}
+
+export function calculateBenchmarkTrend({
+  days,
+  historicalData
+}: {
+  days: number;
+  historicalData: MarketData[];
+}): BenchmarkTrend {
+  const hasEnoughData = historicalData.length >= 2 * days;
+
+  if (!hasEnoughData) {
+    return 'UNKNOWN';
+  }
+
+  const recentPeriodAverage = calculateMovingAverage({
+    days,
+    prices: historicalData.slice(0, days).map(({ marketPrice }) => {
+      return new Big(marketPrice);
+    })
+  });
+
+  const pastPeriodAverage = calculateMovingAverage({
+    days,
+    prices: historicalData.slice(days, 2 * days).map(({ marketPrice }) => {
+      return new Big(marketPrice);
+    })
+  });
+
+  if (recentPeriodAverage > pastPeriodAverage) {
+    return 'UP';
+  }
+
+  if (recentPeriodAverage < pastPeriodAverage) {
+    return 'DOWN';
+  }
+
+  return 'NEUTRAL';
+}
+
+export function calculateMovingAverage({
+  days,
+  prices
+}: {
+  days: number;
+  prices: Big[];
+}) {
+  return prices
+    .reduce((previous, current) => {
+      return previous.add(current);
+    }, new Big(0))
+    .div(days)
+    .toNumber();
+}
+
+export function canApplyFiltersToAccess({ type }: { type: AccessType }) {
+  return type === 'PUBLIC';
+}
+
+export function canDeleteAssetProfile({
+  activitiesCount,
+  isBenchmark,
+  symbol,
+  watchedByCount
+}: Pick<
+  AssetProfileItem,
+  'activitiesCount' | 'isBenchmark' | 'symbol' | 'watchedByCount'
+>): boolean {
+  return (
+    activitiesCount === 0 &&
+    !isBenchmark &&
+    !isDerivedCurrency(getCurrencyFromSymbol(symbol)) &&
+    !isFearAndGreedIndexSymbol(symbol) &&
+    !isRootCurrency(getCurrencyFromSymbol(symbol)) &&
+    watchedByCount === 0
+  );
+}
+
+export function canDeleteUser({
+  currentUserId,
+  userId
+}: {
+  currentUserId: string;
+  userId: string;
+}): boolean {
+  return currentUserId !== userId;
+}
+
+export function canMergeAssetProfile({
+  isBenchmark = false,
+  splitsCount = 0,
+  symbol
+}: Pick<AssetProfileItem, 'isBenchmark' | 'symbol'> & {
+  splitsCount?: number;
+}): boolean {
+  return (
+    !isBenchmark &&
+    !isCurrencySymbol(symbol) &&
+    !isFearAndGreedIndexSymbol(symbol) &&
+    splitsCount === 0
+  );
+}
+
+export function canOpenHoldingDetail({
+  assetProfile
+}: Pick<PortfolioPosition, 'assetProfile'>): boolean {
+  return assetProfile?.assetSubClass !== AssetSubClass.CASH;
+}
+
+export function capitalize(aString: string) {
+  return aString.charAt(0).toUpperCase() + aString.slice(1).toLowerCase();
+}
+
+export function convertValuesToPercentagesOfTotal({
+  total,
+  values
+}: {
+  total: number;
+  values: { [key: string]: { value: number } };
+}) {
+  if (!total) {
+    return;
+  }
+
+  for (const item of Object.values(values)) {
+    item.value = item.value / total;
+  }
+}
+
+export function downloadAsFile({
+  content,
+  contentType = 'text/plain',
+  fileName,
+  format
+}: {
+  content: unknown;
+  contentType?: string;
+  fileName: string;
+  format: 'json' | 'string';
+}) {
+  const a = document.createElement('a');
+
+  if (format === 'json') {
+    content = JSON.stringify(content, undefined, '  ');
+  }
+
+  const file = new Blob([content as string], {
+    type: contentType
+  });
+  a.href = URL.createObjectURL(file);
+  a.download = fileName;
+  a.click();
+}
+
+export function extractNumberFromString({
+  locale = 'en-US',
+  value
+}: {
+  locale?: string;
+  value: string;
+}): number | undefined {
+  try {
+    // Only a leading minus sign indicates a negative value. Detect it before
+    // stripping so that hyphens within the text cannot flip the sign.
+    const isNegative = value.trim().startsWith('-');
+
+    // Remove non-numeric characters (excluding international formatting characters)
+    const numericValue = value.replace(/[^\d.,'’\s]/g, '');
+
+    const parser = new NumberParser(locale);
+    const parsedValue = parser.parse(numericValue);
+
+    return isNegative ? -parsedValue : parsedValue;
+  } catch {
+    return undefined;
+  }
+}
+
+export function formatAssetProfileName({
+  assetSubClass,
+  name
+}: {
+  assetSubClass?: AssetSubClass;
+  name?: string;
+}) {
+  if (assetSubClass === 'CRYPTOCURRENCY') {
+    // Remove DEFAULT_CURRENCY at the end of cryptocurrency names
+    return name?.replace(new RegExp(` ${DEFAULT_CURRENCY}$`), '');
+  }
+
+  return name;
+}
+
+export function formatMonthAndYear({
+  date,
+  locale
+}: {
+  date: Date;
+  locale?: string;
+}) {
+  return new Intl.DateTimeFormat(locale, {
+    month: 'long',
+    year: 'numeric'
+  }).format(date);
+}
+
+export function getAllActivityTypes(): ActivityType[] {
+  return Object.values(ActivityType);
+}
+
+export function getAssetProfileIdentifier({
+  dataSource,
+  symbol
+}: AssetProfileIdentifier) {
+  return `${dataSource}-${symbol}`;
+}
+
+export function getBackgroundColor(aColorScheme: ColorScheme) {
+  return getCssVariable(
+    aColorScheme === 'DARK' ||
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? '--dark-background'
+      : '--light-background'
+  );
+}
+
+export function getCssVariable(aCssVariable: string) {
+  return getComputedStyle(document.documentElement).getPropertyValue(
+    aCssVariable
+  );
+}
+
+export function getCurrencyFromSymbol(aSymbol = '') {
+  return aSymbol.replace(DEFAULT_CURRENCY, '');
+}
+
+export function getCountryCodeFromCurrency(aCurrency = '') {
+  // An ISO 4217 currency code is composed of the ISO 3166-1 alpha-2 country
+  // code and the initial of the currency itself, except for the supranational
+  // currencies, which are prefixed with X (like XAU or XOF)
+  if (aCurrency.startsWith('X')) {
+    return '';
+  }
+
+  return aCurrency.slice(0, 2).toUpperCase();
+}
+
+export function getCountryName({ code }: { code: string }): string {
+  try {
+    return (
+      new Intl.DisplayNames([document.documentElement.lang || DEFAULT_LOCALE], {
+        type: 'region'
+      }).of(code) ?? code
+    );
+  } catch {
+    return code;
+  }
+}
+
+export function getDateFnsLocale(aLanguageCode?: string) {
+  if (aLanguageCode === 'ca') {
+    return ca;
+  } else if (aLanguageCode === 'de') {
+    return de;
+  } else if (aLanguageCode === 'es') {
+    return es;
+  } else if (aLanguageCode === 'fr') {
+    return fr;
+  } else if (aLanguageCode === 'it') {
+    return it;
+  } else if (aLanguageCode === 'ja') {
+    return ja;
+  } else if (aLanguageCode === 'ko') {
+    return ko;
+  } else if (aLanguageCode === 'nl') {
+    return nl;
+  } else if (aLanguageCode === 'pl') {
+    return pl;
+  } else if (aLanguageCode === 'pt') {
+    return pt;
+  } else if (aLanguageCode === 'tr') {
+    return tr;
+  } else if (aLanguageCode === 'uk') {
+    return uk;
+  } else if (aLanguageCode === 'zh') {
+    return zhCN;
+  }
+
+  return undefined;
+}
+
+export function getDateFormatString(aLocale?: string) {
+  const formatObject = new Intl.DateTimeFormat(aLocale).formatToParts(
+    new Date()
+  );
+
+  return formatObject
+    .map(({ type, value }) => {
+      switch (type) {
+        case 'day':
+          return 'dd';
+        case 'month':
+          return 'MM';
+        case 'year':
+          return 'yyyy';
+        default:
+          return value;
+      }
+    })
+    .join('');
+}
+
+export function getDateWithTimeFormatString(aLocale?: string) {
+  return `${getDateFormatString(aLocale)}, HH:mm:ss`;
+}
+
+export function getEmojiFlag(aCountryCode: string) {
+  if (!aCountryCode) {
+    return aCountryCode;
+  }
+
+  return aCountryCode
+    .toUpperCase()
+    .replace(/./g, (character) =>
+      String.fromCodePoint(127397 + character.charCodeAt(0))
+    );
+}
+
+export function getLocale() {
+  return navigator.language ?? DEFAULT_LOCALE;
+}
+
+export function getLowercase(object: object, path: string) {
+  const value = get(object, path);
+
+  if (isNil(value)) {
+    return '';
+  }
+
+  return isString(value) ? value.toLocaleLowerCase() : value;
+}
+
+export function getNumberFormatDecimal(aLocale?: string) {
+  const formatObject = new Intl.NumberFormat(aLocale).formatToParts(9999.99);
+
+  return formatObject.find(({ type }) => {
+    return type === 'decimal';
+  })?.value;
+}
+
+export function getNumberFormatGroup(aLocale = getLocale()) {
+  const formatObject = new Intl.NumberFormat(aLocale, {
+    useGrouping: true
+  }).formatToParts(9999.99);
+
+  return formatObject.find(({ type }) => {
+    return type === 'group';
+  })?.value;
+}
+
+export function getStartOfUtcDate(aDate: Date) {
+  const date = new Date(aDate);
+  date.setUTCHours(0, 0, 0, 0);
+
+  return date;
+}
+
+export function getStartOfUtcDateOfYesterday() {
+  return subDays(getStartOfUtcDate(new Date()), 1, { in: utc });
+}
+
+export function getStringOrNull(aString: string | null | undefined) {
+  const trimmedString = aString?.trim();
+
+  if (trimmedString) {
+    return trimmedString;
+  }
+
+  return null;
+}
+
+export function getStringOrUndefined(aString: string | null | undefined) {
+  const trimmedString = aString?.trim();
+
+  if (trimmedString) {
+    return trimmedString;
+  }
+
+  return undefined;
+}
+
+export function getSum(aArray: Big[]) {
+  if (aArray?.length > 0) {
+    return aArray.reduce((a, b) => a.plus(b), new Big(0));
+  }
+
+  return new Big(0);
+}
+
+export function getTextColor(aColorScheme: ColorScheme) {
+  const cssVariable = getCssVariable(
+    aColorScheme === 'DARK' ||
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? '--light-primary-text'
+      : '--dark-primary-text'
+  );
+
+  const [r, g, b] = cssVariable.split(',');
+
+  return `${r}, ${g}, ${b}`;
+}
+
+export function getUtc(aDateString: string) {
+  const [yearString, monthString, dayString] = aDateString.split('-');
+
+  return new Date(
+    Date.UTC(
+      parseInt(yearString, 10),
+      parseInt(monthString, 10) - 1,
+      parseInt(dayString, 10)
+    )
+  );
+}
+
+export function hasGhostfolioPrefix(aSymbol: string) {
+  if (!aSymbol) {
+    return false;
+  }
+
+  return aSymbol.startsWith(`${ghostfolioPrefix}_`);
+}
+
+export function interpolate(template: string, context: any) {
+  return template?.replace(/[$]{([^}]+)}/g, (_, objectPath) => {
+    const properties = objectPath.split('.');
+    return properties.reduce(
+      (previous, current) => previous?.[current],
+      context
+    );
+  });
+}
+
+export function isAccountExcluded(account?: { tags?: { id: string }[] }) {
+  return (
+    account?.tags?.some(({ id }) => {
+      return id === TAG_ID_EXCLUDE_FROM_ANALYSIS;
+    }) === true
+  );
+}
+
+export function isCashPosition({
+  assetSubClass
+}: {
+  assetSubClass?: AssetSubClass;
+} = {}) {
+  return assetSubClass === AssetSubClass.CASH;
+}
+
+export function isCurrency(aCurrency: string) {
+  if (!aCurrency) {
+    return false;
+  }
+
+  return isISO4217CurrencyCode(aCurrency) || isDerivedCurrency(aCurrency);
+}
+
+export function isCurrencySymbol(aSymbol: string) {
+  if (!aSymbol) {
+    return false;
+  }
+
+  return (
+    aSymbol.length >= 2 * DEFAULT_CURRENCY.length &&
+    isCurrency(
+      aSymbol.substring(0, aSymbol.length - DEFAULT_CURRENCY.length)
+    ) &&
+    isCurrency(aSymbol.substring(aSymbol.length - DEFAULT_CURRENCY.length))
+  );
+}
+
+export function isDerivedCurrency(aCurrency: string) {
+  if (aCurrency === 'USX') {
+    return true;
+  }
+
+  return DERIVED_CURRENCIES.some(({ currency }) => {
+    return currency === aCurrency;
+  });
+}
+
+export function isDraftActivity(activity?: { tags?: { id: string }[] }) {
+  return (
+    activity?.tags?.some(({ id }) => {
+      return id === TAG_ID_DRAFT;
+    }) === true
+  );
+}
+
+export function isFearAndGreedIndexSymbol(aSymbol: string) {
+  return (
+    aSymbol === ghostfolioFearAndGreedIndexSymbolCryptocurrencies ||
+    aSymbol === ghostfolioFearAndGreedIndexSymbolStocks
+  );
+}
+
+export function isRootCurrency(aCurrency: string) {
+  if (aCurrency === 'USD') {
+    return true;
+  }
+
+  return DERIVED_CURRENCIES.find(({ rootCurrency }) => {
+    return rootCurrency === aCurrency;
+  });
+}
+
+/**
+ * Validates the ratio of a stock split, expressed as the number of shares held
+ * after the split (numerator) per number of shares held before (denominator),
+ * for example 4 and 1 for a 4:1 split or 1 and 10 for a 1:10 reverse split. An
+ * equal numerator and denominator would be a no-op.
+ */
+export function isSplitRatio({
+  denominator,
+  numerator
+}: {
+  denominator: number;
+  numerator: number;
+}) {
+  return (
+    Number.isSafeInteger(numerator) &&
+    Number.isSafeInteger(denominator) &&
+    numerator > 0 &&
+    denominator > 0 &&
+    numerator !== denominator
+  );
+}
+
+export function isSystemTag(tag?: { id: string }) {
+  return TAG_IDS_SYSTEM.some((id) => {
+    return id === tag?.id;
+  });
+}
+
+export function isUserSettingOfAuthenticatedUser(aKey: string) {
+  return USER_SETTINGS_KEYS_OF_AUTHENTICATED_USER.includes(
+    aKey as keyof UserSettings
+  );
+}
+
+export function isValidCurrencyCode(aCurrency: string) {
+  if (!aCurrency) {
+    return false;
+  }
+
+  return (
+    isDerivedCurrency(aCurrency) ||
+    (aCurrency === aCurrency.toUpperCase() && isISO4217CurrencyCode(aCurrency))
+  );
+}
+
+export function isValidCustomAssetProfileSymbol(aSymbol: string) {
+  return hasGhostfolioPrefix(aSymbol) || isUUID(aSymbol);
+}
+
+export function isValidDateAfter1970(aDate: Date | string) {
+  const date = isString(aDate) ? parseISO(aDate, { in: utc }) : aDate;
+
+  return isValid(date) && isAfter(date, new Date(0));
+}
+
+/**
+ * A private access is granted to a user, while a public access and an access
+ * of a client of the model context protocol are credentials on their own and
+ * have no grantee. A row which mixes both is neither, hence it is rejected.
+ */
+export function isValidGranteeOfAccess({
+  granteeUserId,
+  type
+}: {
+  granteeUserId?: string | null;
+  type: AccessType;
+}) {
+  return type === 'PRIVATE' ? !!granteeUserId : !granteeUserId;
+}
+
+export function isValidSearchQuery(aQuery: string) {
+  return aQuery?.trim().length >= SEARCH_QUERY_MINIMUM_LENGTH;
+}
+
+export function parseDate(date: string): Date | undefined {
+  if (!date) {
+    return undefined;
+  }
+
+  // Transform 'yyyyMMdd' format to supported format by parse function
+  if (date?.length === 8) {
+    const match = /^(\d{4})(\d{2})(\d{2})$/.exec(date);
+
+    if (match) {
+      const [, year, month, day] = match;
+      date = `${year}-${month}-${day}`;
+    }
+  }
+
+  const dateFormat = [
+    'dd-MM-yyyy',
+    'dd/MM/yyyy',
+    'dd.MM.yyyy',
+    'yyyy-MM-dd',
+    'yyyy/MM/dd',
+    'yyyy.MM.dd',
+    'yyyyMMdd'
+  ].find((format) => {
+    return isMatch(date, format) && format.length === date.length;
+  });
+
+  if (dateFormat) {
+    return parse(date, dateFormat, new Date());
+  }
+
+  return parseISO(date);
+}
+
+export function parseSymbol({ dataSource, symbol }: AssetProfileIdentifier) {
+  const [ticker, exchange] = symbol.split('.');
+
+  return {
+    ticker,
+    exchange: exchange ?? (dataSource === 'YAHOO' ? 'US' : undefined)
+  };
+}
+
+export function resetHours(aDate: Date) {
+  const year = getYear(aDate);
+  const month = getMonth(aDate);
+  const day = getDate(aDate);
+
+  return new Date(Date.UTC(year, month, day));
+}
+
+export function resolveFearAndGreedIndex(aValue?: number) {
+  if (isNil(aValue)) {
+    return { emoji: '⚪', key: 'UNKNOWN', text: 'Unknown' };
+  } else if (aValue <= 25) {
+    return { emoji: '🥵', key: 'EXTREME_FEAR', text: 'Extreme Fear' };
+  } else if (aValue <= 45) {
+    return { emoji: '😨', key: 'FEAR', text: 'Fear' };
+  } else if (aValue <= 55) {
+    return { emoji: '😐', key: 'NEUTRAL', text: 'Neutral' };
+  } else if (aValue < 75) {
+    return { emoji: '😜', key: 'GREED', text: 'Greed' };
+  } else {
+    return { emoji: '🤪', key: 'EXTREME_GREED', text: 'Extreme Greed' };
+  }
+}
+
+export function resolveMarketCondition(
+  aMarketCondition: Benchmark['marketCondition']
+) {
+  if (aMarketCondition === 'ALL_TIME_HIGH') {
+    return { emoji: '🎉' };
+  } else if (aMarketCondition === 'BEAR_MARKET') {
+    return { emoji: '🐻' };
+  } else {
+    return { emoji: undefined };
+  }
+}
+
+export function resolveUserSettings({
+  impersonationUserSettings,
+  userSettings
+}: {
+  impersonationUserSettings?: UserSettings;
+  userSettings: UserSettings;
+}): UserSettings {
+  if (!impersonationUserSettings) {
+    return { ...userSettings };
+  }
+
+  return {
+    ...impersonationUserSettings,
+    ...Object.fromEntries(
+      USER_SETTINGS_KEYS_OF_AUTHENTICATED_USER.map((key) => {
+        return [key, userSettings?.[key]];
+      })
+    )
+  };
+}

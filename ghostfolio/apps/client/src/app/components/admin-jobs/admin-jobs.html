@@ -1,0 +1,245 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <form class="align-items-center d-flex" [formGroup]="filterForm">
+        <mat-form-field appearance="outline" class="w-100 without-hint">
+          <mat-select formControlName="status">
+            <mat-option />
+            @for (
+              statusFilterOption of statusFilterOptions;
+              track statusFilterOption
+            ) {
+              <mat-option [value]="statusFilterOption">{{
+                statusFilterOption
+              }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </form>
+      <table
+        class="gf-table w-100"
+        mat-table
+        matSort
+        matSortActive="created"
+        matSortDirection="desc"
+        [dataSource]="dataSource"
+      >
+        <ng-container matColumnDef="index">
+          <th
+            *matHeaderCellDef
+            class="justify-content-end px-1 py-2"
+            mat-header-cell
+            mat-sort-header="id"
+          >
+            <ng-container i18n>Job ID</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2 text-right" mat-cell>
+            {{ element.id }}
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="type">
+          <th
+            *matHeaderCellDef
+            class="px-1 py-2"
+            mat-header-cell
+            mat-sort-header="name"
+          >
+            <ng-container i18n>Type</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            @if (element.name === 'GATHER_ASSET_PROFILE') {
+              <ng-container i18n>Asset Profile</ng-container>
+            } @else if (element.name === 'GATHER_HISTORICAL_MARKET_DATA') {
+              <ng-container i18n>Historical Market Data</ng-container>
+            } @else if (element.name === 'PORTFOLIO') {
+              <ng-container i18n>Portfolio Snapshot</ng-container>
+            }
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="symbol">
+          <th
+            *matHeaderCellDef
+            class="px-1 py-2"
+            mat-header-cell
+            mat-sort-header="data.symbol"
+          >
+            <ng-container i18n>Symbol</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            {{ element.data?.symbol }}
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="dataSource">
+          <th
+            *matHeaderCellDef
+            class="px-1 py-2"
+            mat-header-cell
+            mat-sort-header="data.dataSource"
+          >
+            <ng-container i18n>Data Source</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            {{ element.data?.dataSource }}
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="priority">
+          <th
+            *matHeaderCellDef
+            class="px-1 py-2"
+            mat-header-cell
+            mat-sort-header="opts.priority"
+          >
+            <ng-container i18n>Priority</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            @if (element.opts.priority === DATA_GATHERING_QUEUE_PRIORITY_LOW) {
+              <ion-icon class="h6 mb-0" name="chevron-down-circle-outline" />
+            } @else if (
+              element.opts.priority === DATA_GATHERING_QUEUE_PRIORITY_MEDIUM
+            ) {
+              <ion-icon class="h6 mb-0" name="remove-circle-outline" />
+            } @else if (
+              element.opts.priority === DATA_GATHERING_QUEUE_PRIORITY_HIGH
+            ) {
+              <ion-icon class="h6 mb-0" name="chevron-up-circle-outline" />
+            }
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="attempts">
+          <th
+            *matHeaderCellDef
+            class="px-1 py-2 text-right"
+            mat-header-cell
+            mat-sort-header="attemptsMade"
+          >
+            <ng-container i18n>Attempts</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2 text-right" mat-cell>
+            {{ element.attemptsMade }}
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="created">
+          <th
+            *matHeaderCellDef
+            class="px-1 py-2"
+            mat-header-cell
+            mat-sort-header="timestamp"
+          >
+            <ng-container i18n>Created</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            {{ element.timestamp | date: defaultDateTimeFormat }}
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="finished">
+          <th *matHeaderCellDef class="px-1 py-2" mat-header-cell>
+            <ng-container i18n>Finished</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            {{ element.finishedOn | date: defaultDateTimeFormat }}
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="status">
+          <th *matHeaderCellDef class="px-1 py-2" mat-header-cell>
+            <ng-container i18n>Status</ng-container>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2" mat-cell>
+            @if (element.state === 'active') {
+              <ion-icon class="h6 mb-0" name="play-outline" />
+            } @else if (element.state === 'completed') {
+              <ion-icon
+                class="h6 mb-0 text-success"
+                name="checkmark-circle-outline"
+              />
+            } @else if (element.state === 'delayed') {
+              <ion-icon
+                class="h6 mb-0"
+                name="time-outline"
+                [class.text-danger]="element.stacktrace?.length > 0"
+              />
+            } @else if (element.state === 'failed') {
+              <ion-icon
+                class="h6 mb-0 text-danger"
+                name="alert-circle-outline"
+              />
+            } @else if (element.state === 'paused') {
+              <ion-icon class="h6 mb-0" name="pause-outline" />
+            } @else if (element.state === 'waiting') {
+              <ion-icon class="h6 mb-0" name="cafe-outline" />
+            }
+          </td>
+        </ng-container>
+
+        <ng-container matColumnDef="actions" stickyEnd>
+          <th *matHeaderCellDef class="px-1 py-2 text-right" mat-header-cell>
+            <button
+              class="mx-1 no-min-width px-2"
+              mat-button
+              [matMenuTriggerFor]="jobsActionsMenu"
+              (click)="$event.stopPropagation()"
+            >
+              <ion-icon name="ellipsis-vertical" />
+            </button>
+            <mat-menu #jobsActionsMenu="matMenu" xPosition="before">
+              <button mat-menu-item (click)="onDeleteJobs()">
+                <ng-container i18n>Delete Jobs</ng-container>
+              </button>
+            </mat-menu>
+          </th>
+          <td *matCellDef="let element" class="px-1 py-2 text-right" mat-cell>
+            <button
+              class="mx-1 no-min-width px-2"
+              mat-button
+              [matMenuTriggerFor]="jobActionsMenu"
+              (click)="$event.stopPropagation()"
+            >
+              <ion-icon name="ellipsis-horizontal" />
+            </button>
+            <mat-menu #jobActionsMenu="matMenu" xPosition="before">
+              <button mat-menu-item (click)="onViewData(element.data)">
+                <span><ng-container i18n>View Data</ng-container>...</span>
+              </button>
+              <button
+                mat-menu-item
+                [disabled]="element.stacktrace?.length <= 0"
+                (click)="onViewStacktrace(element.stacktrace)"
+              >
+                <span
+                  ><ng-container i18n>View Stacktrace</ng-container>...</span
+                >
+              </button>
+              <button mat-menu-item (click)="onExecuteJob(element.id)">
+                <ng-container i18n>Execute Job</ng-container>
+              </button>
+              <hr class="m-0" />
+              <button mat-menu-item (click)="onDeleteJob(element.id)">
+                <ng-container i18n>Delete Job</ng-container>
+              </button>
+            </mat-menu>
+          </td>
+        </ng-container>
+
+        <tr *matHeaderRowDef="displayedColumns" mat-header-row></tr>
+        <tr *matRowDef="let row; columns: displayedColumns" mat-row></tr>
+      </table>
+      @if (isLoading) {
+        <ngx-skeleton-loader
+          animation="pulse"
+          class="px-4 py-3"
+          [theme]="{
+            height: '1.5rem',
+            width: '100%'
+          }"
+        />
+      }
+    </div>
+  </div>
+</div>

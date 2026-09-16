@@ -1,0 +1,37 @@
+import { hasPermission, permissions } from '@ghostfolio/common/permissions';
+import { DataService } from '@ghostfolio/ui/services';
+
+import {
+  ChangeDetectionStrategy,
+  Component,
+  CUSTOM_ELEMENTS_SCHEMA
+} from '@angular/core';
+import { MatCardModule } from '@angular/material/card';
+import { RouterModule } from '@angular/router';
+import { IonIcon } from '@ionic/angular/standalone';
+import { addIcons } from 'ionicons';
+import { chevronForwardOutline } from 'ionicons/icons';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'page' },
+  imports: [IonIcon, MatCardModule, RouterModule],
+  schemas: [CUSTOM_ELEMENTS_SCHEMA],
+  selector: 'gf-blog-page',
+  styleUrls: ['./blog-page.scss'],
+  templateUrl: './blog-page.html'
+})
+export class GfBlogPageComponent {
+  public hasPermissionForSubscription: boolean;
+
+  public constructor(private dataService: DataService) {
+    const info = this.dataService.fetchInfo();
+
+    this.hasPermissionForSubscription = hasPermission(
+      info?.globalPermissions,
+      permissions.enableSubscription
+    );
+
+    addIcons({ chevronForwardOutline });
+  }
+}

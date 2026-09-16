@@ -1,0 +1,47 @@
+import { DataService } from '@ghostfolio/ui/services';
+
+import { CommonModule } from '@angular/common';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  Input,
+  OnInit
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import type { DataSource } from '@prisma/client';
+import { NgxSkeletonLoaderModule } from 'ngx-skeleton-loader';
+import { catchError, map, type Observable, of } from 'rxjs';
+
+import { DataProviderStatus } from './interfaces/interfaces';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [CommonModule, NgxSkeletonLoaderModule],
+  selector: 'gf-data-provider-status',
+  templateUrl: './data-provider-status.component.html'
+})
+export class GfDataProviderStatusComponent implements OnInit {
+  @Input() dataSource: DataSource;
+
+  public status$: Observable<DataProviderStatus>;
+
+  public constructor(
+    private dataService: DataService,
+    private destroyRef: DestroyRef
+  ) {}
+
+  public ngOnInit() {
+    this.status$ = this.dataService
+      .fetchDataProviderHealth(this.dataSource)
+      .pipe(
+        map(() => {
+          return { isHealthy: true };
+        }),
+        catchError(() => {
+          return of({ isHealthy: false });
+        }),
+        takeUntilDestroyed(this.destroyRef)
+      );
+  }
+}

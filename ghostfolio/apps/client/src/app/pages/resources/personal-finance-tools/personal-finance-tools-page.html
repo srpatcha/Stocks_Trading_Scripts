@@ -1,0 +1,61 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <h1 class="d-none d-sm-block h3 mb-4 text-center" i18n>
+        Discover Open Source Alternatives for Personal Finance Tools
+      </h1>
+      <div class="introduction mb-4">
+        <p i18n>
+          This overview page features a curated collection of personal finance
+          tools compared to the open source alternative
+          <a [routerLink]="routerLinkAbout">Ghostfolio</a>. If you value
+          transparency, data privacy, and community collaboration, Ghostfolio
+          provides an excellent opportunity to take control of your financial
+          management.
+        </p>
+        <p i18n>
+          Explore the links below to compare a variety of personal finance tools
+          with Ghostfolio.
+        </p>
+      </div>
+      @for (
+        personalFinanceTool of personalFinanceTools;
+        track personalFinanceTool
+      ) {
+        <mat-card appearance="outlined" [class.mb-3]="!$last">
+          <mat-card-content class="p-0">
+            <div class="container p-0">
+              <div class="flex-nowrap no-gutters row">
+                <a
+                  class="d-flex overflow-hidden p-3 w-100"
+                  i18n-title
+                  title="Compare Ghostfolio to {{
+                    personalFinanceTool.name
+                  }} - {{ personalFinanceTool.slogan }}"
+                  [routerLink]="[
+                    `/${pathResources}`,
+                    pathPersonalFinanceTools,
+                    `${pathAlternativeTo}${personalFinanceTool.alias ?? personalFinanceTool.key}`
+                  ]"
+                >
+                  <div class="flex-grow-1 overflow-hidden">
+                    <div class="h6 m-0 text-truncate" i18n>
+                      Open Source Alternative to {{ personalFinanceTool.name }}
+                    </div>
+                  </div>
+                  <div class="align-items-center d-flex">
+                    <ion-icon
+                      class="chevron text-muted"
+                      name="chevron-forward-outline"
+                      size="small"
+                    />
+                  </div>
+                </a>
+              </div>
+            </div>
+          </mat-card-content>
+        </mat-card>
+      }
+    </div>
+  </div>
+</div>

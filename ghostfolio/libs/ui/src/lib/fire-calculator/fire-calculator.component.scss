@@ -1,0 +1,38 @@
+:host {
+  display: block;
+
+  .chart-container {
+    aspect-ratio: 16 / 9;
+
+    ngx-skeleton-loader {
+      height: 100%;
+    }
+  }
+
+  ::ng-deep {
+    .mdc-text-field--disabled {
+      .mdc-floating-label,
+      .mdc-text-field__input {
+        color: inherit !important;
+      }
+
+      .mdc-notched-outline__leading,
+      .mdc-notched-outline__notch,
+      .mdc-notched-outline__trailing {
+        border-color: rgba(var(--dark-disabled-text));
+      }
+    }
+  }
+}
+
+:host-context(.theme-dark) {
+  ::ng-deep {
+    .mdc-text-field--disabled {
+      .mdc-notched-outline__leading,
+      .mdc-notched-outline__notch,
+      .mdc-notched-outline__trailing {
+        border-color: rgba(var(--light-disabled-text));
+      }
+    }
+  }
+}

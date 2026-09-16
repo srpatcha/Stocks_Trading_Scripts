@@ -1,0 +1,14 @@
+{
+  "/admin/queues": {
+    "target": "http://0.0.0.0:3333",
+    "secure": false
+  },
+  "/api": {
+    "target": "http://0.0.0.0:3333",
+    "secure": false
+  },
+  "/assets": {
+    "target": "http://0.0.0.0:3333",
+    "secure": false
+  }
+}

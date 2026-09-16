@@ -1,0 +1,43 @@
+import { ExportResponse } from '@ghostfolio/common/interfaces';
+
+import { readFileSync } from 'node:fs';
+
+export const activityDummyData = {
+  accountId: undefined,
+  accountUserId: undefined,
+  comment: undefined,
+  createdAt: new Date(),
+  currency: undefined,
+  fee: undefined,
+  feeInAssetProfileCurrency: undefined,
+  feeInBaseCurrency: undefined,
+  id: undefined,
+  symbolProfileId: undefined,
+  unitPrice: undefined,
+  unitPriceInAssetProfileCurrency: undefined,
+  updatedAt: new Date(),
+  userId: undefined,
+  value: undefined,
+  valueInBaseCurrency: undefined
+};
+
+export const assetProfileDummyData = {
+  activitiesCount: undefined,
+  assetClass: undefined,
+  assetSubClass: undefined,
+  countries: [],
+  createdAt: undefined,
+  holdings: [],
+  id: undefined,
+  isActive: true,
+  sectors: [],
+  updatedAt: undefined
+};
+
+export const userDummyData = {
+  id: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+};
+
+export function loadExportFile(filePath: string): ExportResponse {
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}

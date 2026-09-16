@@ -1,0 +1,20 @@
+import { Service } from '@angular/core';
+
+export const KEY_RANGE = 'range';
+export const KEY_STAY_SIGNED_IN = 'staySignedIn';
+export const KEY_TOKEN = 'auth-token';
+
+@Service()
+export class SettingsStorageService {
+  public getSetting(aKey: string): string | null {
+    return window.localStorage.getItem(aKey);
+  }
+
+  public removeSetting(aKey: string) {
+    return window.localStorage.removeItem(aKey);
+  }
+
+  public setSetting(aKey: string, aValue: string) {
+    window.localStorage.setItem(aKey, aValue);
+  }
+}

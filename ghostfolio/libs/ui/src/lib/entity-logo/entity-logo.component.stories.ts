@@ -1,0 +1,61 @@
+import { CommonModule } from '@angular/common';
+import { ANIMATION_MODULE_TYPE, importProvidersFrom } from '@angular/core';
+import { applicationConfig, Meta, StoryObj } from '@storybook/angular';
+
+import { EntityLogoImageSourceServiceMock } from '../mocks/entity-logo-image-source.service.mock';
+import { EntityLogoImageSourceService } from './entity-logo-image-source.service';
+import { GfEntityLogoComponent } from './entity-logo.component';
+
+export default {
+  title: 'Entity Logo',
+  component: GfEntityLogoComponent,
+  decorators: [
+    applicationConfig({
+      providers: [
+        importProvidersFrom(CommonModule),
+        {
+          provide: ANIMATION_MODULE_TYPE,
+          useValue: 'NoopAnimations'
+        },
+        {
+          provide: EntityLogoImageSourceService,
+          useValue: new EntityLogoImageSourceServiceMock()
+        }
+      ]
+    })
+  ]
+} as Meta<GfEntityLogoComponent>;
+
+type Story = StoryObj<GfEntityLogoComponent>;
+
+export const LogoByAssetProfileIdentifier: Story = {
+  args: {
+    dataSource: 'YAHOO',
+    size: 'large',
+    symbol: 'AAPL',
+    tooltip: 'Apple Inc.'
+  }
+};
+
+export const LogoByUrl: Story = {
+  args: {
+    size: 'large',
+    tooltip: 'Ghostfolio',
+    url: 'https://ghostfol.io'
+  }
+};
+
+export const LogoOnError: Story = {
+  args: {
+    size: 'large',
+    tooltip: 'Unknown',
+    url: 'https://unknown.ghostfol.io'
+  }
+};
+
+export const Placeholder: Story = {
+  args: {
+    hasPlaceholder: true,
+    size: 'large'
+  }
+};

@@ -1,0 +1,30 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <h1 class="d-none d-sm-block h3 mb-4 text-center" i18n>Accounts</h1>
+      <gf-accounts-table
+        [accounts]="accounts"
+        [activitiesCount]="activitiesCount"
+        [baseCurrency]="user?.settings?.baseCurrency"
+        [hasPermissionToDeleteAccount]="hasPermissionToDeleteAccount"
+        [hasPermissionToUpdateAccount]="hasPermissionToUpdateAccount"
+        [locale]="user?.settings?.locale ?? DEFAULT_LOCALE"
+        [showActions]="
+          (hasPermissionToDeleteAccount || hasPermissionToUpdateAccount) &&
+          !user.settings.isRestrictedView
+        "
+        [totalBalanceInBaseCurrency]="totalBalanceInBaseCurrency"
+        [totalValueInBaseCurrency]="totalValueInBaseCurrency"
+        (accountDeleted)="onDeleteAccount($event)"
+      />
+    </div>
+  </div>
+
+  @if (hasPermissionToCreateAccount && !user.settings.isRestrictedView) {
+    <gf-fab
+      [routerLink]="internalRoutes.accounts.subRoutes.create.routerLink"
+    />
+  }
+</div>
+
+<router-outlet />

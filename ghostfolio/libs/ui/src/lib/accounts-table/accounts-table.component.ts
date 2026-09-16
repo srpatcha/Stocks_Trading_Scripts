@@ -1,0 +1,202 @@
+import { ConfirmationDialogType } from '@ghostfolio/common/enums';
+import {
+  getLocale,
+  getLowercase,
+  isAccountExcluded
+} from '@ghostfolio/common/helper';
+import { internalRoutes } from '@ghostfolio/common/routes/routes';
+import { AccountWithValue } from '@ghostfolio/common/types';
+import { GfEntityLogoComponent } from '@ghostfolio/ui/entity-logo';
+import { NotificationService } from '@ghostfolio/ui/notifications';
+import { GfValueComponent } from '@ghostfolio/ui/value';
+
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  effect,
+  inject,
+  input,
+  output,
+  viewChild
+} from '@angular/core';
+import { MatButtonModule } from '@angular/material/button';
+import { MatMenuModule } from '@angular/material/menu';
+import { MatSort, MatSortModule } from '@angular/material/sort';
+import { MatTableDataSource, MatTableModule } from '@angular/material/table';
+import { Router, RouterModule } from '@angular/router';
+import { IonIcon } from '@ionic/angular/standalone';
+import { addIcons } from 'ionicons';
+import {
+  arrowRedoOutline,
+  createOutline,
+  documentTextOutline,
+  ellipsisHorizontal,
+  eyeOffOutline,
+  trashOutline,
+  walletOutline
+} from 'ionicons/icons';
+import { NgxSkeletonLoaderModule } from 'ngx-skeleton-loader';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    GfEntityLogoComponent,
+    GfValueComponent,
+    IonIcon,
+    MatButtonModule,
+    MatMenuModule,
+    MatSortModule,
+    MatTableModule,
+    NgxSkeletonLoaderModule,
+    RouterModule
+  ],
+  selector: 'gf-accounts-table',
+  styleUrls: ['./accounts-table.component.scss'],
+  templateUrl: './accounts-table.component.html'
+})
+export class GfAccountsTableComponent {
+  public readonly accounts = input.required<AccountWithValue[] | undefined>();
+  public readonly activitiesCount = input<number>();
+  public readonly baseCurrency = input<string>();
+  public readonly hasPermissionToDeleteAccount = input<boolean>();
+  public readonly hasPermissionToOpenDetails = input(true);
+  public readonly hasPermissionToUpdateAccount = input<boolean>();
+  public readonly locale = input(getLocale());
+  public readonly showActions = input<boolean>();
+  public readonly showActivitiesCount = input(true);
+  public readonly showAllocationInPercentage = input<boolean>();
+  public readonly showBalance = input(true);
+  public readonly showFooter = input(true);
+  public readonly showQuantity = input<boolean>();
+  public readonly showValue = input(true);
+  public readonly showValueInBaseCurrency = input(true);
+  public readonly totalBalanceInBaseCurrency = input<number>();
+  public readonly totalValueInBaseCurrency = input<number>();
+
+  public readonly accountDeleted = output<string>();
+
+  public readonly sort = viewChild.required(MatSort);
+
+  protected readonly accountDialogRouterLinks = computed(() => {
+    const { detail, update } = internalRoutes.accounts.subRoutes;
+
+    const routerLinks = new Map<
+      string,
+      { detail: string[]; update: string[] }
+    >();
+
+    for (const { id } of this.accounts() ?? []) {
+      routerLinks.set(id, {
+        detail: detail.routerLink(id),
+        update: update.routerLink(id)
+      });
+    }
+
+    return routerLinks;
+  });
+
+  protected readonly dataSource = new MatTableDataSource<AccountWithValue>([]);
+
+  protected readonly displayedColumns = computed(() => {
+    const columns = ['status', 'account', 'platform'];
+
+    if (this.showActivitiesCount()) {
+      columns.push('activitiesCount');
+    }
+
+    if (this.showQuantity()) {
+      columns.push('quantity');
+    }
+
+    if (this.showBalance()) {
+      columns.push('balance');
+    }
+
+    if (this.showValue()) {
+      columns.push('value');
+    }
+
+    if (this.showBalance() || this.showValue()) {
+      columns.push('currency');
+    }
+
+    if (this.showValueInBaseCurrency()) {
+      columns.push('valueInBaseCurrency');
+    }
+
+    if (this.showAllocationInPercentage()) {
+      columns.push('allocation');
+    }
+
+    columns.push('comment');
+
+    if (this.showActions()) {
+      columns.push('actions');
+    }
+
+    return columns;
+  });
+
+  protected readonly isLoading = computed(() => !this.accounts());
+
+  protected readonly transferCashBalanceRouterLink =
+    internalRoutes.accounts.subRoutes.transferCashBalance.routerLink;
+
+  private readonly notificationService = inject(NotificationService);
+  private readonly router = inject(Router);
+
+  public constructor() {
+    addIcons({
+      arrowRedoOutline,
+      createOutline,
+      documentTextOutline,
+      ellipsisHorizontal,
+      eyeOffOutline,
+      trashOutline,
+      walletOutline
+    });
+
+    this.dataSource.sortingDataAccessor = getLowercase;
+
+    // Reactive data update
+    effect(() => {
+      this.dataSource.data = this.accounts() ?? [];
+    });
+
+    // Reactive view connection
+    effect(() => {
+      this.dataSource.sort = this.sort();
+    });
+  }
+
+  protected isExcluded(
+    account: AccountWithValue & { tags?: { id: string }[] }
+  ) {
+    return isAccountExcluded(account);
+  }
+
+  protected onDeleteAccount(aId: string) {
+    this.notificationService.confirm({
+      confirmFn: () => {
+        this.accountDeleted.emit(aId);
+      },
+      confirmType: ConfirmationDialogType.Warn,
+      title: $localize`Do you really want to delete this account?`
+    });
+  }
+
+  protected onOpenAccountDetailDialog(accountId: string) {
+    if (this.hasPermissionToOpenDetails()) {
+      void this.router.navigate(
+        internalRoutes.accounts.subRoutes.detail.routerLink(accountId)
+      );
+    }
+  }
+
+  protected onOpenComment(aComment: string) {
+    this.notificationService.alert({
+      title: aComment
+    });
+  }
+}

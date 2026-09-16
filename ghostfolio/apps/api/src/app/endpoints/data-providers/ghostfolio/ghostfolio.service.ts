@@ -1,0 +1,472 @@
+import { SymbolService } from '@ghostfolio/api/app/symbol/symbol.service';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import { DataProviderService } from '@ghostfolio/api/services/data-provider/data-provider.service';
+import { GhostfolioService as GhostfolioDataProviderService } from '@ghostfolio/api/services/data-provider/ghostfolio/ghostfolio.service';
+import {
+  GetAssetProfileParams,
+  GetDividendsParams,
+  GetHistoricalParams,
+  GetQuotesParams,
+  GetSearchParams
+} from '@ghostfolio/api/services/data-provider/interfaces/data-provider.interface';
+import { FetchService } from '@ghostfolio/api/services/fetch/fetch.service';
+import { PrismaService } from '@ghostfolio/api/services/prisma/prisma.service';
+import { PropertyService } from '@ghostfolio/api/services/property/property.service';
+import {
+  DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER_SETUP_PERIOD,
+  DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER_SETUP_PERIOD_MAX_REQUESTS_FACTOR,
+  DEFAULT_CURRENCY,
+  DERIVED_CURRENCIES,
+  PROPERTY_DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER_MAX_REQUESTS
+} from '@ghostfolio/common/config';
+import {
+  getAssetProfileIdentifier,
+  isValidSearchQuery
+} from '@ghostfolio/common/helper';
+import {
+  DataProviderGhostfolioAssetProfileResponse,
+  DataProviderHistoricalResponse,
+  DataProviderInfo,
+  DividendsResponse,
+  HistoricalResponse,
+  LookupItem,
+  LookupResponse,
+  MarketDataOfMarketsResponse,
+  QuotesResponse
+} from '@ghostfolio/common/interfaces';
+import { UserWithSettings } from '@ghostfolio/common/types';
+
+import { Injectable, Logger } from '@nestjs/common';
+import { DataSource, SymbolProfile } from '@prisma/client';
+import { Big } from 'big.js';
+import { addMilliseconds, isBefore } from 'date-fns';
+import { isEmpty } from 'lodash';
+
+@Injectable()
+export class GhostfolioService {
+  private readonly logger = new Logger(GhostfolioService.name);
+
+  public constructor(
+    private readonly configurationService: ConfigurationService,
+    private readonly dataProviderService: DataProviderService,
+    private readonly fetchService: FetchService,
+    private readonly prismaService: PrismaService,
+    private readonly propertyService: PropertyService,
+    private readonly symbolService: SymbolService
+  ) {}
+
+  public async getAssetProfile({ symbol }: GetAssetProfileParams) {
+    let result: DataProviderGhostfolioAssetProfileResponse = {};
+
+    try {
+      const promises: Promise<Partial<SymbolProfile>>[] = [];
+
+      for (const dataProviderService of this.getDataProviderServices()) {
+        promises.push(
+          this.dataProviderService
+            .getAssetProfiles([
+              {
+                symbol,
+                dataSource: dataProviderService.getName()
+              }
+            ])
+            .then(async (assetProfiles) => {
+              const assetProfile =
+                assetProfiles[
+                  getAssetProfileIdentifier({
+                    symbol,
+                    dataSource: dataProviderService.getName()
+                  })
+                ];
+              const dataSourceOrigin = DataSource.GHOSTFOLIO;
+
+              if (assetProfile) {
+                await this.prismaService.assetProfileResolution.upsert({
+                  create: {
+                    dataSourceOrigin,
+                    currency: assetProfile.currency,
+                    dataSourceTarget: assetProfile.dataSource,
+                    symbolOrigin: symbol,
+                    symbolTarget: assetProfile.symbol
+                  },
+                  update: {
+                    requestCount: {
+                      increment: 1
+                    }
+                  },
+                  where: {
+                    dataSourceOrigin_symbolOrigin: {
+                      dataSourceOrigin,
+                      symbolOrigin: symbol
+                    }
+                  }
+                });
+              }
+
+              result = {
+                ...result,
+                ...assetProfile,
+                dataSource: dataSourceOrigin
+              };
+
+              return assetProfile;
+            })
+        );
+      }
+
+      await Promise.all(promises);
+
+      return result;
+    } catch (error) {
+      this.logger.error(error.message);
+
+      throw error;
+    }
+  }
+
+  public async getDividends({
+    from,
+    granularity,
+    requestTimeout = this.configurationService.get('REQUEST_TIMEOUT'),
+    symbol,
+    to
+  }: GetDividendsParams) {
+    const result: DividendsResponse = { dividends: {} };
+
+    try {
+      const promises: Promise<{
+        [date: string]: DataProviderHistoricalResponse;
+      }>[] = [];
+
+      for (const dataProviderService of this.getDataProviderServices()) {
+        promises.push(
+          dataProviderService
+            .getDividends({
+              from,
+              granularity,
+              requestTimeout,
+              symbol,
+              to
+            })
+            .then((dividends) => {
+              result.dividends = dividends;
+
+              return dividends;
+            })
+        );
+      }
+
+      await Promise.all(promises);
+
+      return result;
+    } catch (error) {
+      this.logger.error(error.message);
+
+      throw error;
+    }
+  }
+
+  public async getHistorical({
+    from,
+    granularity,
+    requestTimeout,
+    to,
+    symbol
+  }: GetHistoricalParams) {
+    const result: HistoricalResponse = { historicalData: {} };
+
+    try {
+      const promises: Promise<{
+        [date: string]: DataProviderHistoricalResponse;
+      }>[] = [];
+
+      for (const dataProviderService of this.getDataProviderServices()) {
+        promises.push(
+          dataProviderService
+            .getHistorical({
+              from,
+              granularity,
+              requestTimeout,
+              symbol,
+              to
+            })
+            .then((historicalData) => {
+              result.historicalData = historicalData;
+
+              return historicalData;
+            })
+        );
+      }
+
+      await Promise.all(promises);
+
+      return result;
+    } catch (error) {
+      this.logger.error(error.message);
+
+      throw error;
+    }
+  }
+
+  public async getMarketDataOfMarkets({
+    includeHistoricalData
+  }: {
+    includeHistoricalData: number;
+  }): Promise<MarketDataOfMarketsResponse> {
+    try {
+      const marketDataOfMarkets =
+        await this.symbolService.getMarketDataOfMarkets({
+          includeHistoricalData
+        });
+
+      for (const symbolItem of Object.values(
+        marketDataOfMarkets.fearAndGreedIndex
+      )) {
+        if (!isEmpty(symbolItem)) {
+          symbolItem.dataSource = DataSource.GHOSTFOLIO;
+        }
+      }
+
+      return marketDataOfMarkets;
+    } catch (error) {
+      this.logger.error(error.message);
+
+      throw error;
+    }
+  }
+
+  public async getQuotes({ requestTimeout, symbols }: GetQuotesParams) {
+    const results: QuotesResponse = { quotes: {} };
+
+    try {
+      const promises: Promise<any>[] = [];
+
+      for (const dataProvider of this.getDataProviderServices()) {
+        const maximumNumberOfSymbolsPerRequest =
+          dataProvider.getMaxNumberOfSymbolsPerRequest?.() ??
+          Number.MAX_SAFE_INTEGER;
+
+        for (
+          let i = 0;
+          i < symbols.length;
+          i += maximumNumberOfSymbolsPerRequest
+        ) {
+          const symbolsChunk = symbols.slice(
+            i,
+            i + maximumNumberOfSymbolsPerRequest
+          );
+
+          const promise = Promise.resolve(
+            dataProvider.getQuotes({ requestTimeout, symbols: symbolsChunk })
+          );
+
+          promises.push(
+            promise.then(async (result) => {
+              for (const [symbol, dataProviderResponse] of Object.entries(
+                result
+              )) {
+                dataProviderResponse.dataSource = 'GHOSTFOLIO';
+
+                if (
+                  [
+                    ...DERIVED_CURRENCIES.map(({ currency }) => {
+                      return `${DEFAULT_CURRENCY}${currency}`;
+                    }),
+                    `${DEFAULT_CURRENCY}USX`
+                  ].includes(symbol)
+                ) {
+                  continue;
+                }
+
+                results.quotes[symbol] = dataProviderResponse;
+
+                for (const {
+                  currency,
+                  factor,
+                  rootCurrency
+                } of DERIVED_CURRENCIES) {
+                  if (symbol === `${DEFAULT_CURRENCY}${rootCurrency}`) {
+                    results.quotes[`${DEFAULT_CURRENCY}${currency}`] = {
+                      ...dataProviderResponse,
+                      currency,
+                      marketPrice: new Big(
+                        result[`${DEFAULT_CURRENCY}${rootCurrency}`].marketPrice
+                      )
+                        .mul(factor)
+                        .toNumber(),
+                      marketState: 'open'
+                    };
+                  }
+                }
+              }
+            })
+          );
+        }
+
+        await Promise.all(promises);
+      }
+
+      return results;
+    } catch (error) {
+      this.logger.error(error.message);
+
+      throw error;
+    }
+  }
+
+  public async getStatus({ user }: { user: UserWithSettings }) {
+    const dailyRequestsMax = await this.getMaxDailyRequests();
+
+    return {
+      dailyRequestsMax,
+      // Cap the reported requests, as they can exceed the reported limit
+      // within the setup period
+      dailyRequests: Math.min(
+        dailyRequestsMax,
+        user.dataProviderGhostfolioDailyRequests
+      ),
+      isWithinSetupPeriod: this.isWithinSetupPeriod({ user }),
+      subscription: user.subscription
+    };
+  }
+
+  public async incrementDailyRequests({ userId }: { userId: string }) {
+    await this.prismaService.analytics.upsert({
+      create: {
+        dataProviderGhostfolioDailyRequests: 1,
+        user: { connect: { id: userId } }
+      },
+      update: {
+        dataProviderGhostfolioDailyRequests: { increment: 1 }
+      },
+      where: { userId }
+    });
+  }
+
+  public async isDailyRequestLimitExceeded({
+    user
+  }: {
+    user: UserWithSettings;
+  }) {
+    const maxDailyRequests = await this.getMaxDailyRequests();
+
+    if (user.dataProviderGhostfolioDailyRequests < maxDailyRequests) {
+      return false;
+    }
+
+    if (this.isWithinSetupPeriod({ user })) {
+      return (
+        user.dataProviderGhostfolioDailyRequests >=
+        maxDailyRequests *
+          DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER_SETUP_PERIOD_MAX_REQUESTS_FACTOR
+      );
+    }
+
+    return true;
+  }
+
+  public async lookup({
+    includeIndices = false,
+    query
+  }: GetSearchParams): Promise<LookupResponse> {
+    const results: LookupResponse = { items: [] };
+
+    query = query?.trim();
+
+    if (!isValidSearchQuery(query)) {
+      return results;
+    }
+
+    try {
+      let lookupItems: LookupItem[] = [];
+      const promises: Promise<{ items: LookupItem[] }>[] = [];
+
+      for (const dataProviderService of this.getDataProviderServices()) {
+        promises.push(
+          dataProviderService.search({
+            includeIndices,
+            query
+          })
+        );
+      }
+
+      const searchResults = await Promise.all(promises);
+
+      for (const { items } of searchResults) {
+        if (items?.length > 0) {
+          lookupItems = lookupItems.concat(items);
+        }
+      }
+
+      const filteredItems = lookupItems
+        .filter(({ currency }) => {
+          // Only allow symbols with supported currency
+          return currency ? true : false;
+        })
+        .sort(({ name: name1 }, { name: name2 }) => {
+          return name1?.toLowerCase().localeCompare(name2?.toLowerCase());
+        })
+        .map((lookupItem) => {
+          lookupItem.dataProviderInfo = this.getDataProviderInfo();
+          lookupItem.dataSource = 'GHOSTFOLIO';
+
+          return lookupItem;
+        });
+
+      results.items = filteredItems;
+
+      return results;
+    } catch (error) {
+      this.logger.error(error.message);
+
+      throw error;
+    }
+  }
+
+  private getDataProviderInfo(): DataProviderInfo {
+    const ghostfolioDataProviderService = new GhostfolioDataProviderService(
+      this.configurationService,
+      this.fetchService,
+      this.propertyService
+    );
+
+    return {
+      ...ghostfolioDataProviderService.getDataProviderInfo(),
+      isPremium: false,
+      name: 'Ghostfolio Premium'
+    };
+  }
+
+  private getDataProviderServices() {
+    return this.configurationService
+      .get('DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER')
+      .map((dataSource) => {
+        return this.dataProviderService.getDataProvider(DataSource[dataSource]);
+      });
+  }
+
+  private async getMaxDailyRequests() {
+    return parseInt(
+      (await this.propertyService.getByKey<string>(
+        PROPERTY_DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER_MAX_REQUESTS
+      )) || '0',
+      10
+    );
+  }
+
+  private isWithinSetupPeriod({ user }: { user: UserWithSettings }) {
+    const subscribedAt = user.subscription?.subscribedAt;
+
+    if (!subscribedAt) {
+      return false;
+    }
+
+    return isBefore(
+      new Date(),
+      addMilliseconds(
+        subscribedAt,
+        DATA_SOURCES_GHOSTFOLIO_DATA_PROVIDER_SETUP_PERIOD
+      )
+    );
+  }
+}

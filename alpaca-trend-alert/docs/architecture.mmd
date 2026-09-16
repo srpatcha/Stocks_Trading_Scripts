@@ -1,0 +1,59 @@
+flowchart TD
+    subgraph Client
+        C1[User runs client.py]
+        C2[WebSocket connects to Server]
+        C3[Receive alert]
+        C4{Buy or Ignore?}
+        C5[Send action back]
+    end
+
+    subgraph Server
+        S1[Start FastAPI + Uvicorn]
+        S2[GET /login → Redirect to Alpaca OAuth]
+        S3[User authorizes in browser]
+        S4[GET /oauth/callback receives code]
+        S5[Exchange code for access_token]
+        S6[Store token in memory]
+        S7[Init TradingClient]
+        S8[Background: Trend Watcher loop]
+        S9[Fetch snapshots every N sec]
+        S10{Price change ≥ threshold?}
+        S11[Broadcast alert via WebSocket]
+        S12{Client response?}
+        S13[Submit Market Order]
+        S14[Dismiss alert]
+        S15[Token expires → re-login]
+    end
+
+    subgraph Alpaca
+        A1[OAuth Authorize Page]
+        A2[Token Endpoint]
+        A3[Market Data API]
+        A4[Trading API]
+    end
+
+    C1 --> C2
+    S1 --> S2
+    S2 --> A1
+    A1 --> S3
+    S3 --> S4
+    S4 --> A2
+    A2 --> S5
+    S5 --> S6
+    S6 --> S7
+    S7 --> S8
+    S8 --> S9
+    S9 --> A3
+    A3 --> S10
+    S10 -- Yes --> S11
+    S10 -- No --> S8
+    S11 --> C3
+    C3 --> C4
+    C4 -- Buy --> C5
+    C4 -- Ignore --> C5
+    C5 --> S12
+    S12 -- Buy --> S13
+    S12 -- Ignore --> S14
+    S13 --> A4
+    S6 -.->|15 min| S15
+    S15 --> S2   

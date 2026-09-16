@@ -1,0 +1,34 @@
+:host {
+  .label {
+    font-weight: 600;
+    letter-spacing: -0.03em;
+  }
+
+  .logo {
+    background-color: currentColor;
+    margin-top: -2px;
+    mask: url('/assets/ghost.svg') no-repeat center;
+  }
+}
+
+:host-context(.large) {
+  .label {
+    font-size: 3rem;
+  }
+
+  .logo {
+    height: 2.5rem;
+    width: 2.5rem;
+  }
+}
+
+:host-context(.medium) {
+  .label {
+    font-size: 1.5rem;
+  }
+
+  .logo {
+    height: 1.5rem;
+    width: 1.5rem;
+  }
+}

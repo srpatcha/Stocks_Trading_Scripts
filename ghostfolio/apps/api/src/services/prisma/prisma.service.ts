@@ -1,0 +1,55 @@
+import {
+  Injectable,
+  Logger,
+  LogLevel,
+  OnModuleDestroy,
+  OnModuleInit
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Prisma, PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
+  private readonly logger = new Logger(PrismaService.name);
+
+  public constructor(configService: ConfigService) {
+    const adapter = new PrismaPg({
+      connectionString: configService.get<string>('DATABASE_URL')
+    });
+
+    let customLogLevels: LogLevel[] | undefined;
+
+    try {
+      customLogLevels = JSON.parse(
+        configService.get<string>('LOG_LEVELS')
+      ) as LogLevel[];
+    } catch {}
+
+    const log: Prisma.LogDefinition[] =
+      customLogLevels?.includes('debug') || customLogLevels?.includes('verbose')
+        ? [{ emit: 'stdout', level: 'query' }]
+        : [];
+
+    super({
+      adapter,
+      log,
+      errorFormat: 'colorless'
+    });
+  }
+
+  public async onModuleInit() {
+    try {
+      await this.$connect();
+    } catch (error) {
+      this.logger.error(error);
+    }
+  }
+
+  public async onModuleDestroy() {
+    await this.$disconnect();
+  }
+}

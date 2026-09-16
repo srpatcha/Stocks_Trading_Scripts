@@ -1,0 +1,26 @@
+<div
+  class="d-inline-flex p-1 activity-type-badge"
+  [class]="{
+    buy: activityType === 'BUY',
+    dividend: activityType === 'DIVIDEND',
+    fee: activityType === 'FEE',
+    interest: activityType === 'INTEREST',
+    liability: activityType === 'LIABILITY',
+    sell: activityType === 'SELL'
+  }"
+>
+  @if (activityType === 'BUY') {
+    <ion-icon name="arrow-up-circle-outline" />
+  } @else if (activityType === 'DIVIDEND' || activityType === 'INTEREST') {
+    <ion-icon name="add-circle-outline" />
+  } @else if (activityType === 'FEE') {
+    <ion-icon name="hammer-outline" />
+  } @else if (activityType === 'LIABILITY') {
+    <ion-icon name="flame-outline" />
+  } @else if (activityType === 'SELL') {
+    <ion-icon name="arrow-down-circle-outline" />
+  }
+  <span class="d-none d-lg-block mx-1 text-nowrap">
+    {{ activityTypeLabel }}
+  </span>
+</div>

@@ -1,0 +1,542 @@
+@use '@angular/material' as mat;
+@use 'sass:color';
+
+@use './styles/bootstrap';
+@use './styles/table' as table;
+@use './styles/variables' as variables;
+
+@use 'svgmap/style.min';
+
+:root {
+  --dark-background: rgb(25, 25, 25);
+  --font-family-sans-serif: 'Inter', Roboto, 'Helvetica Neue', sans-serif;
+  --light-background: rgb(255, 255, 255);
+
+  --dark-primary-text:
+    #{color.channel(variables.$dark-primary-text, 'red')},
+    #{color.channel(variables.$dark-primary-text, 'green')},
+    #{color.channel(variables.$dark-primary-text, 'blue')},
+    #{color.channel(variables.$dark-primary-text, 'alpha')};
+  --dark-secondary-text: 0, 0, 0, 0.54;
+  --dark-accent-text: 0, 0, 0, 0.87;
+  --dark-warn-text: 0, 0, 0, 0.87;
+  --dark-disabled-text: 0, 0, 0, 0.38;
+  --dark-dividers: 0, 0, 0, 0.12;
+  --dark-focused: 0, 0, 0, 0.12;
+  --light-primary-text:
+    #{color.channel(variables.$light-primary-text, 'red')},
+    #{color.channel(variables.$light-primary-text, 'green')},
+    #{color.channel(variables.$light-primary-text, 'blue')},
+    #{color.channel(variables.$light-primary-text, 'alpha')};
+  --light-secondary-text: 255, 255, 255, 0.7;
+  --light-accent-text: 255, 255, 255, 1;
+  --light-warn-text: 255, 255, 255, 1;
+  --light-disabled-text: 255, 255, 255, 0.5;
+  --light-dividers: 255, 255, 255, 0.12;
+  --light-focused: 255, 255, 255, 0.12;
+  --palette-background-status-bar: 224, 224, 224;
+  --palette-background-app-bar: 245, 245, 245;
+  --palette-background-background: 250, 250, 250;
+  --palette-background-hover: 0, 0, 0;
+  --palette-background-hover-alpha: 0.04;
+  --palette-background-card: 255, 255, 255;
+  --palette-background-dialog: 255, 255, 255;
+  --palette-background-disabled-button: 0, 0, 0;
+  --palette-background-disabled-button-alpha: 0.12;
+  --palette-background-raised-button: 255, 255, 255;
+  --palette-background-focused-button: 0, 0, 0;
+  --palette-background-focused-button-alpha: 0.12;
+  --palette-background-selected-button: 224, 224, 224;
+  --palette-background-selected-disabled-button: 189, 189, 189;
+  --palette-background-disabled-button-toggle: 238, 238, 238;
+  --palette-background-unselected-chip: 224, 224, 224;
+  --palette-background-disabled-list-option: 238, 238, 238;
+  --palette-background-tooltip: 97, 97, 97;
+  --palette-background-status-bar-dark: 0, 0, 0;
+  --palette-background-app-bar-dark: 33, 33, 33;
+  --palette-background-background-dark: 48, 48, 48;
+  --palette-background-hover-dark: 255, 255, 255;
+  --palette-background-hover-dark-alpha: 0.04;
+  --palette-background-card-dark: 66, 66, 66;
+  --palette-background-dialog-dark: 66, 66, 66;
+  --palette-background-disabled-button-dark: 255, 255, 255;
+  --palette-background-disabled-button-dark-alpha: 0.12;
+  --palette-background-raised-button-dark: 66, 66, 66;
+  --palette-background-focused-button-dark: 255, 255, 255;
+  --palette-background-focused-button-dark-alpha: 0.12;
+  --palette-background-selected-button-dark: 33, 33, 33;
+  --palette-background-selected-disabled-button-dark: 66, 66, 66;
+  --palette-background-disabled-button-toggle-dark: 0, 0, 0;
+  --palette-background-unselected-chip-dark: 97, 97, 97;
+  --palette-background-disabled-list-option-dark: 0, 0, 0;
+  --palette-background-tooltip-dark: 97, 97, 97;
+  --palette-foreground-base: 0, 0, 0;
+  --palette-foreground-divider: 0, 0, 0;
+  --palette-foreground-divider-alpha: 0.12;
+  --palette-foreground-dividers: 0, 0, 0;
+  --palette-foreground-dividers-alpha: 0.12;
+  --palette-foreground-disabled: 0, 0, 0;
+  --palette-foreground-disabled-alpha: 0.38;
+  --palette-foreground-disabled-button: 0, 0, 0;
+  --palette-foreground-disabled-button-alpha: 0.26;
+  --palette-foreground-disabled-text: 0, 0, 0;
+  --palette-foreground-disabled-text-alpha: 0.38;
+  --palette-foreground-hint-text: 0, 0, 0;
+  --palette-foreground-hint-text-alpha: 0.38;
+  --palette-foreground-secondary-text: 0, 0, 0;
+  --palette-foreground-secondary-text-alpha: 0.54;
+  --palette-foreground-icon: 0, 0, 0;
+  --palette-foreground-icon-alpha: 0.54;
+  --palette-foreground-icons: 0, 0, 0;
+  --palette-foreground-icons-alpha: 0.54;
+  --palette-foreground-text: 0, 0, 0;
+  --palette-foreground-text-alpha: 0.87;
+  --palette-foreground-slider-min: 0, 0, 0;
+  --palette-foreground-slider-min-alpha: 0.87;
+  --palette-foreground-slider-off: 0, 0, 0;
+  --palette-foreground-slider-off-alpha: 0.26;
+  --palette-foreground-slider-off-active: 0, 0, 0;
+  --palette-foreground-slider-off-active-alpha: 0.38;
+  --palette-foreground-base-dark: 255, 255, 255;
+  --palette-foreground-divider-dark: 255, 255, 255;
+  --palette-foreground-divider-dark-alpha: 0.12;
+  --palette-foreground-dividers-dark: 255, 255, 255;
+  --palette-foreground-dividers-dark-alpha: 0.12;
+  --palette-foreground-disabled-dark: 255, 255, 255;
+  --palette-foreground-disabled-dark-alpha: 0.5;
+  --palette-foreground-disabled-button-dark: 255, 255, 255;
+  --palette-foreground-disabled-button-dark-alpha: 0.3;
+  --palette-foreground-disabled-text-dark: 255, 255, 255;
+  --palette-foreground-disabled-text-dark-alpha: 0.5;
+  --palette-foreground-hint-text-dark: 255, 255, 255;
+  --palette-foreground-hint-text-dark-alpha: 0.5;
+  --palette-foreground-secondary-text-dark: 255, 255, 255;
+  --palette-foreground-secondary-text-dark-alpha: 0.7;
+  --palette-foreground-icon-dark: 255, 255, 255;
+  --palette-foreground-icon-dark-alpha: 1;
+  --palette-foreground-icons-dark: 255, 255, 255;
+  --palette-foreground-icons-dark-alpha: 1;
+  --palette-foreground-text-dark: 255, 255, 255;
+  --palette-foreground-text-dark-alpha: 1;
+  --palette-foreground-slider-min-dark: 255, 255, 255;
+  --palette-foreground-slider-min-dark-alpha: 1;
+  --palette-foreground-slider-off-dark: 255, 255, 255;
+  --palette-foreground-slider-off-dark-alpha: 0.3;
+  --palette-foreground-slider-off-active-dark: 255, 255, 255;
+  --palette-foreground-slider-off-active-dark-alpha: 0.38;
+
+  --palette-primary-50: 231, 249, 249;
+  --palette-primary-100: 195, 241, 240;
+  --palette-primary-200: 155, 231, 230;
+  --palette-primary-300: 114, 221, 219;
+  --palette-primary-400: 84, 214, 212;
+  --palette-primary-500: 54, 207, 204;
+  --palette-primary-600: 48, 202, 199;
+  --palette-primary-700: 41, 195, 192;
+  --palette-primary-800: 34, 189, 185;
+  --palette-primary-900: 22, 178, 173;
+  --palette-primary-A100: 229, 255, 254;
+  --palette-primary-A200: 178, 255, 253;
+  --palette-primary-A400: 127, 255, 251;
+  --palette-primary-A700: 101, 255, 250;
+  --palette-primary-contrast-50: 0, 0, 0, 0.87;
+  --palette-primary-contrast-100: 0, 0, 0, 0.87;
+  --palette-primary-contrast-200: 0, 0, 0, 0.87;
+  --palette-primary-contrast-300: 0, 0, 0, 0.87;
+  --palette-primary-contrast-400: 0, 0, 0, 0.87;
+  --palette-primary-contrast-500: 0, 0, 0, 0.87;
+  --palette-primary-contrast-600: 0, 0, 0, 0.87;
+  --palette-primary-contrast-700: 0, 0, 0, 0.87;
+  --palette-primary-contrast-800: 0, 0, 0, 0.87;
+  --palette-primary-contrast-900: 0, 0, 0, 0.87;
+  --palette-accent-50: 231, 240, 249;
+  --palette-accent-100: 195, 219, 241;
+  --palette-accent-200: 155, 195, 231;
+  --palette-accent-300: 114, 170, 221;
+  --palette-accent-400: 84, 152, 214;
+  --palette-accent-500: 54, 134, 207;
+  --palette-accent-600: 48, 126, 202;
+  --palette-accent-700: 41, 115, 195;
+  --palette-accent-800: 34, 105, 189;
+  --palette-accent-900: 22, 86, 178;
+  --palette-accent-A100: 229, 239, 255;
+  --palette-accent-A200: 178, 207, 255;
+  --palette-accent-A400: 127, 175, 255;
+  --palette-accent-A700: 101, 159, 255;
+  --palette-accent-contrast-50: 0, 0, 0, 0.87;
+  --palette-accent-contrast-100: 0, 0, 0, 0.87;
+  --palette-accent-contrast-200: 0, 0, 0, 0.87;
+  --palette-accent-contrast-300: 0, 0, 0, 0.87;
+  --palette-accent-contrast-400: 0, 0, 0, 0.87;
+  --palette-accent-contrast-500: 255, 255, 255, 1;
+  --palette-accent-contrast-600: 255, 255, 255, 1;
+  --palette-accent-contrast-700: 255, 255, 255, 1;
+  --palette-accent-contrast-800: 255, 255, 255, 1;
+  --palette-accent-contrast-900: 255, 255, 255, 1;
+  --palette-warn-50: 251, 231, 233;
+  --palette-warn-100: 245, 194, 199;
+  --palette-warn-200: 238, 154, 162;
+  --palette-warn-300: 231, 114, 125;
+  --palette-warn-400: 225, 83, 97;
+  --palette-warn-500: 220, 53, 69;
+  --palette-warn-600: 216, 48, 62;
+  --palette-warn-700: 211, 40, 54;
+  --palette-warn-800: 206, 34, 46;
+  --palette-warn-900: 197, 22, 31;
+  --palette-warn-A100: 255, 246, 247;
+  --palette-warn-A200: 255, 195, 198;
+  --palette-warn-A400: 255, 144, 149;
+  --palette-warn-A700: 255, 119, 124;
+  --palette-warn-contrast-50: 0, 0, 0, 0.87;
+  --palette-warn-contrast-100: 0, 0, 0, 0.87;
+  --palette-warn-contrast-200: 0, 0, 0, 0.87;
+  --palette-warn-contrast-300: 0, 0, 0, 0.87;
+  --palette-warn-contrast-400: 255, 255, 255, 1;
+  --palette-warn-contrast-500: 255, 255, 255, 1;
+  --palette-warn-contrast-600: 255, 255, 255, 1;
+  --palette-warn-contrast-700: 255, 255, 255, 1;
+  --palette-warn-contrast-800: 255, 255, 255, 1;
+  --palette-warn-contrast-900: 255, 255, 255, 1;
+}
+
+body {
+  font-family: var(--font-family-sans-serif);
+  margin: 0;
+  min-height: 100%;
+
+  a {
+    color: var(--dark-primary-text);
+
+    &:hover {
+      color: unset;
+      text-decoration: none;
+    }
+  }
+
+  .blog {
+    a {
+      &:not(.mdc-button) {
+        color: rgba(var(--palette-primary-500), 1) !important;
+        font-weight: 500;
+
+        &:hover {
+          text-decoration: underline;
+        }
+      }
+    }
+  }
+
+  &.theme-dark {
+    background: var(--dark-background);
+    color: rgba(var(--light-primary-text));
+
+    a {
+      color: var(--light-primary-text);
+    }
+
+    hr {
+      border-top-color: rgba(var(--light-dividers));
+    }
+
+    ngx-skeleton-loader {
+      .skeleton-loader {
+        background-color: #323232;
+      }
+    }
+
+    .gf-table {
+      @include table.gf-table(true);
+    }
+
+    .mat-mdc-dialog-container {
+      --mat-dialog-container-color: var(--dark-background);
+
+      .mdc-dialog__content {
+        --mat-dialog-supporting-text-color: rgba(var(--light-primary-text));
+      }
+    }
+
+    .mat-mdc-fab,
+    .mat-mdc-unelevated-button {
+      &.mat-primary {
+        color: rgba(var(--dark-primary-text)) !important;
+      }
+    }
+
+    .mdc-button {
+      &.mat-accent,
+      &.mat-primary {
+        --mat-button-filled-label-text-color: rgba(var(--dark-primary-text));
+      }
+    }
+
+    .svgMap-tooltip {
+      background: var(--dark-background);
+
+      .svgMap-tooltip-content table td span {
+        color: rgba(var(--light-primary-text));
+      }
+    }
+
+    .with-placeholder-as-option {
+      .mat-mdc-select-placeholder {
+        color: rgba(var(--light-primary-text));
+      }
+
+      &.mat-mdc-select-disabled {
+        .mat-mdc-select-placeholder {
+          color: rgba(var(--light-disabled-text));
+        }
+      }
+    }
+  }
+}
+
+button:focus {
+  outline: 0;
+}
+
+hr {
+  border-top: 1px solid rgba(var(--dark-dividers));
+}
+
+ion-icon {
+  pointer-events: none;
+}
+
+ngx-skeleton-loader {
+  display: block;
+  line-height: 0;
+  outline: 0;
+
+  .skeleton-loader {
+    display: flex;
+    margin: 0 !important;
+    outline: 0;
+  }
+}
+
+[hidden] {
+  display: flex !important;
+  visibility: hidden;
+}
+
+.breadcrumb {
+  background-color: unset;
+  flex-wrap: nowrap;
+  padding: unset;
+}
+
+.breadcrumb-item {
+  flex-wrap: nowrap;
+
+  &.active {
+    color: unset;
+  }
+}
+
+.cdk-overlay-container {
+  .cdk-global-overlay-wrapper {
+    justify-content: center !important;
+  }
+}
+
+.cursor-default {
+  cursor: default;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+
+.gf-pointer-events-none {
+  pointer-events: none;
+}
+
+.gf-spacer {
+  flex: 1 1 auto;
+}
+
+.gf-table {
+  @include table.gf-table;
+}
+
+.gf-text-wrap-balance {
+  text-wrap: balance;
+}
+
+.has-info-message {
+  // Restrict viewport height of tabbed views when the Live Demo or system announcements banner are displayed
+  .page:has(gf-page-tabs) {
+    height: calc(100svh - 2 * var(--mat-toolbar-standard-height));
+  }
+}
+
+.hidden {
+  visibility: hidden;
+}
+
+.lead {
+  font-weight: unset;
+}
+
+.line-height-1 {
+  line-height: 1;
+}
+
+.line-height-normal {
+  line-height: normal !important;
+}
+
+.mat-mdc-button-base {
+  .mdc-button__label {
+    align-items: center;
+    display: flex;
+  }
+}
+
+.mat-mdc-card {
+  .mat-mdc-card-title {
+    margin-bottom: 0.5rem;
+  }
+}
+
+.mat-mdc-checkbox {
+  label {
+    margin-bottom: 0;
+  }
+}
+
+.mat-mdc-dialog-container {
+  .mdc-dialog__content {
+    --mat-dialog-supporting-text-color: rgba(var(--dark-primary-text));
+  }
+
+  @media (max-width: 575.98px) {
+    // Tabs fill the available width on mobile
+    .mat-mdc-tab-group {
+      .mat-mdc-tab {
+        flex-grow: 1;
+        min-width: unset;
+        padding: 0 0.5rem;
+      }
+    }
+  }
+}
+
+.mat-mdc-fab,
+.mat-mdc-unelevated-button {
+  &.mat-primary {
+    color: rgba(var(--light-primary-text)) !important;
+  }
+}
+
+.mat-mdc-form-field {
+  &.without-hint {
+    .mat-mdc-form-field-subscript-wrapper {
+      display: none;
+    }
+  }
+}
+
+.mat-mdc-menu-panel {
+  &.no-max-width {
+    max-width: unset !important;
+
+    .mat-mdc-menu-content {
+      padding: 0;
+    }
+  }
+
+  .mat-mdc-menu-item {
+    &.font-weight-bold {
+      .mat-mdc-menu-item-text {
+        --mat-menu-item-label-text-weight: 700;
+      }
+    }
+
+    .mdc-list-item__primary-text {
+      align-items: center;
+      display: flex;
+    }
+  }
+}
+
+.mat-stepper-vertical,
+.mat-stepper-horizontal {
+  background: transparent !important;
+}
+
+.mdc-button {
+  &.mat-accent,
+  &.mat-primary {
+    --mat-button-filled-label-text-color: rgba(var(--light-primary-text));
+  }
+}
+
+.mdc-dialog__actions {
+  padding: 12px 24px !important;
+}
+
+.mdc-dialog__title {
+  padding: 9px 24px !important;
+}
+
+.no-height {
+  height: unset !important;
+}
+
+.no-min-width {
+  min-width: unset !important;
+}
+
+.overflow-x-auto {
+  overflow-x: auto;
+}
+
+.page {
+  display: flex;
+  overflow-y: auto;
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: constant(safe-area-inset-bottom);
+
+  // Restrict viewport height and layout boundaries only when the page hosts tab navigation
+  &:has(gf-page-tabs) {
+    height: calc(100svh - var(--mat-toolbar-standard-height));
+  }
+
+  // Apply vertical padding only to standalone or nested content views (tabs handle their own padding)
+  &:not(:has(gf-page-tabs)) {
+    @media (min-width: 576px) {
+      padding: 2rem 0;
+    }
+  }
+}
+
+.svgMap-tooltip {
+  border-bottom: none;
+
+  .svgMap-tooltip-pointer {
+    display: none;
+  }
+}
+
+.text-decoration-underline {
+  text-decoration: underline !important;
+}
+
+.text-line-through {
+  text-decoration: line-through;
+}
+
+.with-placeholder-as-option {
+  .mat-mdc-select-placeholder {
+    color: rgba(var(--dark-primary-text));
+  }
+
+  &.mat-mdc-select-disabled {
+    .mat-mdc-select-placeholder {
+      color: rgba(var(--dark-disabled-text));
+    }
+  }
+}

@@ -1,0 +1,92 @@
+<div class="py-3">
+  <div class="align-items-center flex-nowrap no-gutters row">
+    @if (isLoading) {
+      <div>
+        <ngx-skeleton-loader
+          animation="pulse"
+          class="mr-2"
+          [theme]="{
+            height: '2rem',
+            width: '2rem'
+          }"
+        />
+      </div>
+    } @else {
+      <div
+        class="align-items-center d-flex icon-container mr-2 px-2"
+        [class]="{
+          okay: rule?.value === true,
+          warn: rule?.value === false
+        }"
+      >
+        @if (rule?.value === true) {
+          <ion-icon name="checkmark-circle-outline" />
+        } @else if (rule?.isActive === true) {
+          <ion-icon name="warning-outline" />
+        } @else {
+          <ion-icon class="text-muted" name="remove-circle-outline" />
+        }
+      </div>
+    }
+    @if (isLoading) {
+      <div class="flex-grow-1">
+        <ngx-skeleton-loader
+          animation="pulse"
+          class="mt-1 mb-1"
+          [theme]="{
+            height: '1rem',
+            width: '10rem'
+          }"
+        />
+        <ngx-skeleton-loader
+          animation="pulse"
+          [theme]="{
+            height: '1rem',
+            width: '15rem'
+          }"
+        />
+      </div>
+    } @else {
+      <div class="flex-grow-1">
+        <div class="h6 my-1">{{ rule?.name }}</div>
+        <div class="evaluation">{{ rule?.evaluation }}</div>
+      </div>
+      <div>
+        @if (hasPermissionToUpdateUserSettings) {
+          <button
+            class="mx-1 no-min-width px-2"
+            mat-button
+            [matMenuTriggerFor]="rulesMenu"
+            (click)="$event.stopPropagation()"
+          >
+            <ion-icon name="ellipsis-horizontal" />
+          </button>
+          <mat-menu #rulesMenu="matMenu" xPosition="before">
+            @if (rule?.isActive && rule?.configuration) {
+              <button mat-menu-item (click)="onCustomizeRule(rule)">
+                <span class="align-items-center d-flex">
+                  <ion-icon class="mr-2" name="options-outline" />
+                  <span><ng-container i18n>Customize</ng-container>...</span>
+                </span>
+              </button>
+              <hr class="my-0" />
+            }
+            <button mat-menu-item (click)="onUpdateRule(rule)">
+              @if (rule?.isActive) {
+                <span class="align-items-center d-flex">
+                  <ion-icon class="mr-2" name="remove-circle-outline" />
+                  <span i18n>Deactivate</span>
+                </span>
+              } @else {
+                <span class="align-items-center d-flex">
+                  <ion-icon class="mr-2" name="add-circle-outline" />
+                  <span i18n>Activate</span>
+                </span>
+              }
+            </button>
+          </mat-menu>
+        }
+      </div>
+    }
+  </div>
+</div>

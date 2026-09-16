@@ -1,0 +1,223 @@
+<div (click)="$event.stopPropagation()">
+  <div
+    [style.width]="deviceType === 'mobile' ? '85vw' : '30rem'"
+    (keydown.tab)="$event.stopPropagation()"
+  >
+    <div class="align-items-center d-flex search-container">
+      <ion-icon class="ml-2 mr-0" name="search-outline" />
+      <input
+        #search
+        autocomplete="off"
+        autocorrect="off"
+        class="border-0 p-2 w-100"
+        name="search"
+        type="text"
+        [formControl]="searchFormControl"
+        [maxlength]="SEARCH_QUERY_MAXIMUM_LENGTH"
+        [placeholder]="placeholder"
+      />
+      @if (deviceType !== 'mobile' && !searchFormControl.value) {
+        <div class="hot-key-hint mx-1 px-1">/</div>
+      }
+      @if (searchFormControl.value) {
+        <button
+          class="h-100 no-min-width px-3 rounded-0"
+          mat-button
+          (click)="initialize()"
+        >
+          <ion-icon class="m-0" name="close-circle-outline" />
+        </button>
+      } @else {
+        <button
+          class="h-100 no-min-width px-3 rounded-0"
+          mat-button
+          (click)="onCloseAssistant()"
+        >
+          <ion-icon class="m-0" name="close-outline" />
+        </button>
+      }
+    </div>
+    @if (searchFormControl.value) {
+      <div class="overflow-auto py-2 result-container">
+        @if (
+          !isLoading.accounts &&
+          !isLoading.assetProfiles &&
+          !isLoading.holdings &&
+          !isLoading.quickLinks &&
+          searchResults.accounts?.length === 0 &&
+          searchResults.assetProfiles?.length === 0 &&
+          searchResults.holdings?.length === 0 &&
+          searchResults.quickLinks?.length === 0
+        ) {
+          <div class="px-3 py-1 text-muted" i18n>No results found...</div>
+        } @else {
+          @if (
+            isLoading.quickLinks || searchResults?.quickLinks?.length !== 0
+          ) {
+            <div class="mb-2">
+              <div class="font-weight-bold px-3 text-muted title">
+                <ng-container i18n>Quick Links</ng-container>
+              </div>
+              @for (
+                searchResultItem of searchResults.quickLinks;
+                track searchResultItem
+              ) {
+                <gf-assistant-list-item
+                  [item]="searchResultItem"
+                  (clicked)="onCloseAssistant()"
+                />
+              }
+              @if (isLoading.quickLinks) {
+                <ngx-skeleton-loader
+                  animation="pulse"
+                  class="mx-3"
+                  [theme]="{
+                    height: '1.5rem',
+                    width: '100%'
+                  }"
+                />
+              }
+            </div>
+          }
+          @if (isLoading.accounts || searchResults?.accounts?.length !== 0) {
+            <div>
+              <div class="font-weight-bold px-3 text-muted title">
+                <ng-container i18n>Accounts</ng-container>
+              </div>
+              @for (
+                searchResultItem of searchResults.accounts;
+                track searchResultItem
+              ) {
+                <gf-assistant-list-item
+                  [item]="searchResultItem"
+                  (clicked)="onCloseAssistant()"
+                />
+              }
+              @if (isLoading.accounts) {
+                <ngx-skeleton-loader
+                  animation="pulse"
+                  class="mx-3"
+                  [theme]="{
+                    height: '1.5rem',
+                    width: '100%'
+                  }"
+                />
+              }
+            </div>
+          }
+          @if (isLoading.holdings || searchResults?.holdings?.length !== 0) {
+            <div>
+              <div class="font-weight-bold px-3 text-muted title">
+                <ng-container i18n>Holdings</ng-container>
+              </div>
+              @for (
+                searchResultItem of searchResults.holdings;
+                track searchResultItem
+              ) {
+                <gf-assistant-list-item
+                  [item]="searchResultItem"
+                  (clicked)="onCloseAssistant()"
+                />
+              }
+              @if (isLoading.holdings) {
+                <ngx-skeleton-loader
+                  animation="pulse"
+                  class="mx-3"
+                  [theme]="{
+                    height: '1.5rem',
+                    width: '100%'
+                  }"
+                />
+              }
+            </div>
+          }
+          @if (
+            hasPermissionToAccessAdminControl &&
+            (isLoading.assetProfiles ||
+              searchResults?.assetProfiles?.length !== 0)
+          ) {
+            <div class="mt-2">
+              <div class="font-weight-bold px-3 text-muted title">
+                <ng-container i18n>Asset Profiles</ng-container>
+              </div>
+              @for (
+                searchResultItem of searchResults.assetProfiles;
+                track searchResultItem
+              ) {
+                <gf-assistant-list-item
+                  [item]="searchResultItem"
+                  (clicked)="onCloseAssistant()"
+                />
+              }
+              @if (isLoading.assetProfiles) {
+                <ngx-skeleton-loader
+                  animation="pulse"
+                  class="mx-3"
+                  [theme]="{
+                    height: '1.5rem',
+                    width: '100%'
+                  }"
+                />
+              }
+            </div>
+          }
+        }
+      </div>
+    }
+  </div>
+  @if (!searchFormControl.value) {
+    <div class="date-range-selector-container p-3">
+      <mat-form-field appearance="outline" class="w-100 without-hint">
+        <mat-label i18n>Date Range</mat-label>
+        <mat-select
+          [formControl]="dateRangeFormControl"
+          (selectionChange)="onChangeDateRange($event.value)"
+        >
+          @for (
+            dateRangeOption of dateRangeOptions;
+            track dateRangeOption.value
+          ) {
+            <mat-option [value]="dateRangeOption.value">{{
+              dateRangeOption.label
+            }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    </div>
+    <div class="p-3">
+      <gf-portfolio-filter-form
+        #portfolioFilterForm
+        [accounts]="user?.accounts ?? []"
+        [assetClasses]="assetClasses"
+        [formControl]="portfolioFilterFormControl"
+        [holdings]="holdings"
+        [tags]="tags"
+      />
+      <div class="d-flex w-100">
+        <button
+          mat-button
+          type="button"
+          [disabled]="
+            !portfolioFilterForm.hasFilters() || portfolioFilterForm.disabled()
+          "
+          (click)="onResetFilters()"
+        >
+          <ng-container i18n>Reset Filters</ng-container>
+        </button>
+        <span class="gf-spacer"></span>
+        <button
+          color="primary"
+          mat-flat-button
+          type="button"
+          [disabled]="
+            !portfolioFilterForm.filterForm.dirty ||
+            portfolioFilterForm.disabled()
+          "
+          (click)="onApplyFilters()"
+        >
+          <ng-container i18n>Apply Filters</ng-container>
+        </button>
+      </div>
+    </div>
+  }
+</div>

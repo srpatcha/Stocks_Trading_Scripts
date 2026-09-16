@@ -1,0 +1,109 @@
+import { AccountBalanceService } from '@ghostfolio/api/app/account-balance/account-balance.service';
+import { ActivitiesService } from '@ghostfolio/api/app/activities/activities.service';
+import { PortfolioCalculatorFactory } from '@ghostfolio/api/app/portfolio/calculator/portfolio-calculator.factory';
+import { PortfolioSnapshotValue } from '@ghostfolio/api/app/portfolio/interfaces/snapshot-value.interface';
+import { RedisCacheService } from '@ghostfolio/api/app/redis-cache/redis-cache.service';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import {
+  CACHE_TTL_INFINITE,
+  DEFAULT_PROCESSOR_PORTFOLIO_SNAPSHOT_COMPUTATION_CONCURRENCY,
+  PORTFOLIO_SNAPSHOT_PROCESS_JOB_NAME,
+  PORTFOLIO_SNAPSHOT_COMPUTATION_QUEUE
+} from '@ghostfolio/common/config';
+
+import { Process, Processor } from '@nestjs/bull';
+import { Injectable, Logger } from '@nestjs/common';
+import { Job } from 'bull';
+import { addMilliseconds } from 'date-fns';
+
+import { PortfolioSnapshotQueueJob } from './interfaces/portfolio-snapshot-queue-job.interface';
+
+@Injectable()
+@Processor(PORTFOLIO_SNAPSHOT_COMPUTATION_QUEUE)
+export class PortfolioSnapshotProcessor {
+  private readonly logger = new Logger(PortfolioSnapshotProcessor.name);
+
+  public constructor(
+    private readonly accountBalanceService: AccountBalanceService,
+    private readonly activitiesService: ActivitiesService,
+    private readonly calculatorFactory: PortfolioCalculatorFactory,
+    private readonly configurationService: ConfigurationService,
+    private readonly redisCacheService: RedisCacheService
+  ) {}
+
+  @Process({
+    concurrency: parseInt(
+      process.env.PROCESSOR_PORTFOLIO_SNAPSHOT_COMPUTATION_CONCURRENCY ??
+        DEFAULT_PROCESSOR_PORTFOLIO_SNAPSHOT_COMPUTATION_CONCURRENCY.toString(),
+      10
+    ),
+    name: PORTFOLIO_SNAPSHOT_PROCESS_JOB_NAME
+  })
+  public async calculatePortfolioSnapshot(job: Job<PortfolioSnapshotQueueJob>) {
+    try {
+      const startTime = performance.now();
+
+      this.logger.log(
+        `Portfolio snapshot calculation of user '${job.data.userId}' has been started`
+      );
+
+      const { activities } =
+        await this.activitiesService.getActivitiesForPortfolioCalculator({
+          filters: job.data.filters,
+          userCurrency: job.data.userCurrency,
+          userId: job.data.userId,
+          withCash: true
+        });
+
+      const accountBalanceItems =
+        await this.accountBalanceService.getAccountBalanceItems({
+          filters: job.data.filters,
+          userCurrency: job.data.userCurrency,
+          userId: job.data.userId
+        });
+
+      const portfolioCalculator = this.calculatorFactory.createCalculator({
+        accountBalanceItems,
+        activities,
+        calculationType: job.data.calculationType,
+        currency: job.data.userCurrency,
+        filters: job.data.filters,
+        userId: job.data.userId
+      });
+
+      const snapshot = await portfolioCalculator.computeSnapshot();
+
+      this.logger.log(
+        `Portfolio snapshot calculation of user '${job.data.userId}' has been completed in ${(
+          (performance.now() - startTime) /
+          1000
+        ).toFixed(3)} seconds`
+      );
+
+      const expiration = addMilliseconds(
+        new Date(),
+        this.configurationService.get('CACHE_QUOTES_TTL')
+      );
+
+      await this.redisCacheService.set(
+        this.redisCacheService.getPortfolioSnapshotKey({
+          filters: job.data.filters,
+          userId: job.data.userId
+        }),
+        JSON.stringify({
+          expiration: expiration.getTime(),
+          portfolioSnapshot: snapshot
+        } as unknown as PortfolioSnapshotValue),
+        CACHE_TTL_INFINITE
+      );
+
+      return snapshot;
+    } catch (error) {
+      this.logger.error(
+        `Portfolio snapshot calculation of user '${job.data.userId}' has failed: ${error.message}`
+      );
+
+      throw new Error(error);
+    }
+  }
+}

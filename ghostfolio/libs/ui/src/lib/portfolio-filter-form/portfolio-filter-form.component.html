@@ -1,0 +1,61 @@
+<form [formGroup]="filterForm">
+  <div class="mb-3">
+    <gf-account-selector
+      formControlName="account"
+      [accounts]="accounts()"
+      [hasHint]="false"
+      [hasNullOption]="true"
+      [label]="labelAccount"
+    />
+  </div>
+  <div class="mb-3">
+    <mat-form-field appearance="outline" class="w-100 without-hint">
+      <mat-label i18n>Holding</mat-label>
+      <mat-select
+        formControlName="holding"
+        [compareWith]="holdingComparisonFunction"
+      >
+        <mat-select-trigger>{{
+          filterForm.get('holding')?.value?.assetProfile?.name
+        }}</mat-select-trigger>
+        <mat-option [value]="null" />
+        @for (holding of holdings(); track holding.assetProfile.name) {
+          <mat-option [value]="holding">
+            <div class="line-height-1 text-truncate">
+              <span>{{ holding.assetProfile.name }}</span>
+              <br />
+              <small class="text-muted"
+                >{{ holding.assetProfile.symbol }} ·
+                {{ holding.assetProfile.currency }}</small
+              >
+            </div>
+          </mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+  </div>
+  <div class="mb-3">
+    <mat-form-field appearance="outline" class="w-100 without-hint">
+      <mat-label i18n>Tag</mat-label>
+      <mat-select formControlName="tag">
+        <mat-option [value]="null" />
+        @for (tag of tags(); track tag.id) {
+          <mat-option [value]="tag.id">{{ tag.label }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+  </div>
+  <div class="mb-3">
+    <mat-form-field appearance="outline" class="w-100 without-hint">
+      <mat-label i18n>Asset Class</mat-label>
+      <mat-select formControlName="assetClass">
+        <mat-option [value]="null" />
+        @for (assetClass of assetClasses(); track assetClass.id) {
+          <mat-option [value]="assetClass.id">{{
+            assetClass.label
+          }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+  </div>
+</form>

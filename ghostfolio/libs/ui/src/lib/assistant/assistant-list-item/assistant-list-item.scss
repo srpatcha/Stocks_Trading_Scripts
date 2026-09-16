@@ -1,0 +1,28 @@
+:host {
+  display: block;
+
+  &.has-focus {
+    background-color: rgba(var(--palette-primary-500), 1);
+
+    a {
+      color: rgba(var(--light-primary-text));
+      font-weight: bold;
+
+      .text-muted {
+        color: rgba(var(--light-primary-text)) !important;
+      }
+    }
+  }
+}
+
+:host-context(.theme-dark) {
+  &.has-focus {
+    a {
+      color: rgba(var(--dark-primary-text));
+
+      .text-muted {
+        color: rgba(var(--dark-primary-text)) !important;
+      }
+    }
+  }
+}

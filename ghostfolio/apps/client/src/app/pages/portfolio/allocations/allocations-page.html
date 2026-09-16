@@ -1,0 +1,353 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <h1 class="d-none d-sm-block h3 mb-3 text-center" i18n>Allocations</h1>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="mb-2 overflow-hidden w-100">
+          <mat-card-title class="m-0 text-truncate" i18n
+            >Proportion of Net Worth</mat-card-title
+          >
+          <gf-value
+            class="justify-content-end l-2"
+            size="medium"
+            [isLoading]="isLoading"
+            [isPercent]="true"
+            [value]="portfolioDetails?.summary?.filteredValueInPercentage"
+          />
+        </mat-card-header>
+        <mat-card-content>
+          <mat-progress-bar
+            mode="determinate"
+            [title]="`${(
+              (portfolioDetails?.summary?.filteredValueInPercentage ?? 0) * 100
+            ).toFixed(2)}%`"
+            [value]="
+              (portfolioDetails?.summary?.filteredValueInPercentage ?? 0) * 100
+            "
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+  <div class="proportion-charts row">
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="text-truncate" i18n
+            >By Platform</mat-card-title
+          >
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="platforms"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['id']"
+            [locale]="user?.settings?.locale"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By Currency</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="holdings"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['currency']"
+            [locale]="user?.settings?.locale"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By Asset Class</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="holdings"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['assetClassLabel', 'assetSubClassLabel']"
+            [locale]="user?.settings?.locale"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-12 allocations-by-symbol">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <ng-container i18n>By Holding</ng-container>
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            class="mx-auto"
+            cursor="pointer"
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="symbols"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['symbol']"
+            [locale]="user?.settings?.locale"
+            [showLabels]="deviceType() !== 'mobile'"
+            (proportionChartClicked)="onSymbolChartClicked($event)"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By Sector</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="sectors"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['name']"
+            [locale]="user?.settings?.locale"
+            [maxItems]="10"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By Continent</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="continents"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['name']"
+            [locale]="user?.settings?.locale"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By Market</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="marketsAdvanced"
+            [isInPercentage]="showValuesInPercentage()"
+            [locale]="user?.settings?.locale"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+  <div class="row world-map-chart">
+    <div class="col-lg">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>Regions</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="world-map-chart-container">
+            <gf-world-map-chart
+              [countries]="countries"
+              [format]="worldMapChartFormat"
+              [isInPercentage]="showValuesInPercentage()"
+              [locale]="user?.settings?.locale"
+            />
+          </div>
+          <div class="row">
+            <div class="col-xs-12 col-md my-2">
+              <gf-value
+                i18n
+                size="large"
+                [isLoading]="isLoading"
+                [isPercent]="true"
+                [value]="markets?.developedMarkets?.valueInPercentage"
+                >Developed Markets</gf-value
+              >
+            </div>
+            <div class="col-xs-12 col-md my-2">
+              <gf-value
+                i18n
+                size="large"
+                [isLoading]="isLoading"
+                [isPercent]="true"
+                [value]="markets?.emergingMarkets?.valueInPercentage"
+                >Emerging Markets</gf-value
+              >
+            </div>
+            <div class="col-xs-12 col-md my-2">
+              <gf-value
+                i18n
+                size="large"
+                [isLoading]="isLoading"
+                [isPercent]="true"
+                [value]="markets?.otherMarkets?.valueInPercentage"
+                >Other Markets</gf-value
+              >
+            </div>
+            @if ((markets?.[UNKNOWN_KEY]?.valueInPercentage ?? 0) > 0) {
+              <div class="col-xs-12 col-md my-2">
+                <gf-value
+                  i18n
+                  size="large"
+                  [isLoading]="isLoading"
+                  [isPercent]="true"
+                  [value]="markets?.[UNKNOWN_KEY]?.valueInPercentage"
+                  >No data available</gf-value
+                >
+              </div>
+            }
+          </div>
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By Country</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="countries"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['name']"
+            [locale]="user?.settings?.locale"
+            [maxItems]="10"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="text-truncate" i18n>By Account</mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            cursor="pointer"
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="accounts"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['id']"
+            [locale]="user?.settings?.locale"
+            (proportionChartClicked)="onAccountChartClicked($event)"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By ETF Provider</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [colorScheme]="user?.settings?.colorScheme"
+            [data]="holdings"
+            [isInPercentage]="showValuesInPercentage()"
+            [keys]="['etfProvider']"
+            [locale]="user?.settings?.locale"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div
+      class="col-md-12"
+      [class.d-none]="!user?.settings?.isExperimentalFeatures"
+    >
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="align-items-center d-flex text-truncate">
+            <span i18n>By ETF Holding</span>
+            @if (user?.subscription?.type === 'Basic') {
+              <gf-premium-indicator class="ml-1" />
+            }
+          </mat-card-title>
+          <mat-card-subtitle>
+            <ng-container i18n
+              >Approximation based on the top holdings of each ETF</ng-container
+            >
+          </mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-top-holdings
+            [baseCurrency]="user?.settings?.baseCurrency"
+            [locale]="user?.settings?.locale"
+            [pageSize]="10"
+            [topHoldings]="topHoldings"
+            (holdingClicked)="onSymbolChartClicked($event)"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,23 @@
+name: ghostfolio_build
+services:
+  ghostfolio:
+    build: ../
+    image: ghostfolio/ghostfolio:local
+    extends:
+      file: docker-compose.yml
+      service: ghostfolio
+
+  postgres:
+    container_name: gf-postgres-build
+    extends:
+      file: docker-compose.yml
+      service: postgres
+
+  redis:
+    container_name: gf-redis-build
+    extends:
+      file: docker-compose.yml
+      service: redis
+
+volumes:
+  postgres:

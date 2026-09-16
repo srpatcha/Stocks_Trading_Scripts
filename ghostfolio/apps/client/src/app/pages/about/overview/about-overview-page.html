@@ -1,0 +1,234 @@
+<div class="container">
+  <div class="mb-5 row">
+    <div class="col">
+      <h1 class="d-none d-sm-block h3 mb-4 text-center">
+        <ng-container i18n>About Ghostfolio</ng-container>
+      </h1>
+      <div class="about-container">
+        <p>
+          <ng-container i18n
+            >Ghostfolio is a lightweight wealth management application for
+            individuals to keep track of stocks, ETFs or cryptocurrencies and
+            make solid, data-driven investment decisions.</ng-container
+          >
+          <ng-container>&nbsp;</ng-container>
+          <ng-container i18n
+            >The source code is fully available as
+            <a
+              href="https://github.com/ghostfolio/ghostfolio"
+              i18n-title
+              title="Find Ghostfolio on GitHub"
+              >open source software</a
+            >
+            (OSS) under the
+            <a
+              href="https://www.gnu.org/licenses/agpl-3.0.html"
+              title="GNU Affero General Public License"
+              >AGPL-3.0 license</a
+            ></ng-container
+          >
+          @if (hasPermissionForStatistics) {
+            <ng-container>&nbsp;</ng-container>
+            <ng-container i18n
+              >and we share aggregated
+              <a title="Open Startup" [routerLink]="routerLinkOpenStartup"
+                >key metrics</a
+              >
+              of the platform’s performance</ng-container
+            >
+          }
+          <ng-container>. </ng-container>
+          <ng-container i18n>The project has been initiated by</ng-container>
+          <a
+            href="https://dotsilver.ch"
+            i18n-title
+            title="Website of Thomas Kaul"
+          >
+            Thomas Kaul
+          </a>
+          <ng-container i18n
+            >and is driven by the efforts of its
+            <a
+              href="https://github.com/ghostfolio/ghostfolio/graphs/contributors"
+              i18n-title
+              title="Contributors to Ghostfolio"
+              >contributors</a
+            ></ng-container
+          >.
+          @if (hasPermissionForSubscription) {
+            <ng-container i18n>Check the system status at</ng-container>
+            <ng-container>&nbsp;</ng-container>
+            <a
+              href="https://status.ghostfol.io"
+              i18n-title
+              title="Ghostfolio Status"
+              >status.ghostfol.io</a
+            >.
+          }
+        </p>
+        <p>
+          <ng-container i18n>
+            If you encounter a bug, would like to suggest an improvement or a
+            new
+            <a [routerLink]="routerLinkFeatures">feature</a>, please join the
+            Ghostfolio
+            <a
+              href="https://join.slack.com/t/ghostfolio/shared_invite/zt-vsaan64h-F_I0fEo5M0P88lP9ibCxFg"
+              i18n-title
+              title="Join the Ghostfolio Slack community"
+              >Slack</a
+            >
+            community, post to
+            <a
+              href="https://x.com/ghostfolio_"
+              i18n-title
+              title="Post to Ghostfolio on X (formerly Twitter)"
+              >&#64;ghostfolio_</a
+            ></ng-container
+          >
+          @if (user?.subscription?.type === 'Premium') {
+            <ng-container>, </ng-container>
+            <ng-container i18n>send an e-mail to</ng-container>
+            <ng-container>&nbsp;</ng-container>
+            <a href="mailto:hi@ghostfol.io" i18n-title title="Send an e-mail"
+              >hi&#64;ghostfol.io</a
+            >
+          }
+          <ng-container>&nbsp;</ng-container>
+          <ng-container i18n>or start a discussion at</ng-container>
+          <ng-container>&nbsp;</ng-container>
+          <a
+            href="https://github.com/ghostfolio/ghostfolio/discussions"
+            i18n-title
+            title="Find Ghostfolio on GitHub"
+            >GitHub</a
+          >.
+        </p>
+        <p class="align-items-center d-flex justify-content-center">
+          <a
+            class="mx-2"
+            href="https://join.slack.com/t/ghostfolio/shared_invite/zt-vsaan64h-F_I0fEo5M0P88lP9ibCxFg"
+            i18n-title
+            mat-icon-button
+            title="Join the Ghostfolio Slack community"
+          >
+            <ion-icon name="logo-slack" />
+          </a>
+          <a
+            class="mx-2"
+            href="https://x.com/ghostfolio_"
+            i18n-title
+            mat-icon-button
+            title="Follow Ghostfolio on X (formerly Twitter)"
+          >
+            <ion-icon name="logo-x" />
+          </a>
+          @if (user?.subscription?.type === 'Premium') {
+            <a
+              class="mx-2"
+              href="mailto:hi@ghostfol.io"
+              i18n-title
+              mat-icon-button
+              title="Send an e-mail"
+            >
+              <ion-icon name="mail" />
+            </a>
+          }
+          <a
+            class="mx-2"
+            href="https://github.com/ghostfolio/ghostfolio"
+            i18n-title
+            mat-icon-button
+            title="Find Ghostfolio on GitHub"
+          >
+            <ion-icon name="logo-github" />
+          </a>
+          <a
+            class="mx-2"
+            href="https://linkedin.com/company/ghostfolio"
+            i18n-title
+            mat-icon-button
+            title="Follow Ghostfolio on LinkedIn"
+          >
+            <ion-icon name="logo-linkedin" />
+          </a>
+        </p>
+        @if (hasPermissionForSubscription) {
+          <div class="d-flex justify-content-center">
+            <div
+              class="independent-and-bootstrapped-logo mb-2"
+              i18n-title
+              title="Ghostfolio is an independent & bootstrapped business"
+            ></div>
+          </div>
+        } @else {
+          <div class="d-flex justify-content-center">
+            <a
+              href="https://www.buymeacoffee.com/ghostfolio"
+              i18n-title
+              target="_blank"
+              title="Support Ghostfolio"
+              ><img
+                class="mb-2"
+                src="../assets/images/button-buy-me-a-coffee.png"
+                width="180"
+            /></a>
+          </div>
+        }
+      </div>
+    </div>
+  </div>
+
+  <div class="mb-5 row">
+    <div
+      class="col-md-6 col-xs-12 my-2"
+      [class.offset-md-3]="hasPermissionForSubscription === false"
+    >
+      <a
+        class="py-4 w-100"
+        color="primary"
+        i18n
+        mat-flat-button
+        [routerLink]="routerLinkFaq"
+        >Frequently Asked Questions (FAQ)</a
+      >
+    </div>
+    @if (hasPermissionForSubscription) {
+      <div class="col-md-6 col-xs-12 my-2">
+        <a
+          class="py-4 w-100"
+          color="primary"
+          mat-flat-button
+          [routerLink]="routerLinkBlog"
+          >Blog</a
+        >
+      </div>
+    }
+  </div>
+
+  @if (user?.subscription?.type !== 'Premium') {
+    <div class="row">
+      <div class="col-12">
+        <h2 class="h4 mb-3">Sponsors</h2>
+        <div class="text-center">
+          <div class="mb-2 small">Browser testing via</div>
+          <a
+            href="https://www.testmuai.com?utm_medium=sponsor&utm_source=ghostfolio"
+            target="_blank"
+            title="TestMu AI - AI Powered Testing Tool"
+          >
+            <img
+              alt="TestMu AI Logo"
+              height="32"
+              [src]="
+                user?.settings?.colorScheme === 'DARK'
+                  ? '../assets/images/sponsors/logo-testmu-light.svg'
+                  : '../assets/images/sponsors/logo-testmu-dark.svg'
+              "
+            />
+          </a>
+        </div>
+      </div>
+    </div>
+  }
+</div>

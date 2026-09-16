@@ -1,0 +1,45 @@
+<mat-form-field appearance="outline" class="w-100">
+  <ion-icon class="mat-icon" matPrefix name="search-outline" />
+  <mat-chip-grid #chipList aria-label="Search keywords">
+    @for (filter of selectedFilters; track filter) {
+      <mat-chip-row
+        class="mx-1 my-0 px-2 py-0"
+        [removable]="true"
+        (removed)="onRemoveFilter(filter)"
+      >
+        {{ filter.label }}
+        <button matChipRemove type="button">
+          <ion-icon name="close-outline" />
+        </button>
+      </mat-chip-row>
+    }
+    <input
+      #searchInput
+      name="close-outline"
+      [formControl]="searchControl"
+      [matAutocomplete]="autocomplete"
+      [matChipInputFor]="chipList"
+      [matChipInputSeparatorKeyCodes]="separatorKeysCodes"
+      [placeholder]="placeholder()"
+      (matChipInputTokenEnd)="onAddFilter($event)"
+    />
+  </mat-chip-grid>
+  <mat-autocomplete
+    #autocomplete="matAutocomplete"
+    (optionSelected)="onSelectFilter($event)"
+  >
+    @for (filterGroup of filterGroups$ | async; track filterGroup) {
+      <mat-optgroup [label]="filterGroup.name">
+        @for (filter of filterGroup.filters; track filter) {
+          <mat-option [value]="filter.id">
+            {{ filter.label }}
+          </mat-option>
+        }
+      </mat-optgroup>
+    }
+  </mat-autocomplete>
+
+  @if (isLoading()) {
+    <mat-spinner class="mx-2" matSuffix [diameter]="20" />
+  }
+</mat-form-field>

@@ -1,0 +1,92 @@
+<div class="container p-0">
+  <div class="row">
+    <div class="col-md-3">
+      <form class="mb-4" [formGroup]="calculatorForm">
+        <!--<mat-form-field appearance="outline">
+          <input formControlName="principalInvestmentAmount" matInput />
+        </mat-form-field>-->
+
+        <mat-form-field appearance="outline" class="w-100">
+          <mat-label i18n>Savings Rate per Month</mat-label>
+          <input
+            formControlName="paymentPerPeriod"
+            matInput
+            step="100"
+            type="number"
+          />
+          <span class="ml-2" matTextSuffix>{{ currency }}</span>
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="w-100">
+          <mat-label i18n>Annual Interest Rate</mat-label>
+          <input
+            formControlName="annualInterestRate"
+            matInput
+            step="0.25"
+            type="number"
+          />
+          <div class="ml-2" matTextSuffix>%</div>
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="w-100">
+          <mat-label i18n>Retirement Date</mat-label>
+          <div>{{ retirementDateLabel }}</div>
+          <input
+            class="d-none"
+            formControlName="retirementDate"
+            matInput
+            [matDatepicker]="date"
+            [min]="minDate"
+          />
+          <mat-datepicker-toggle
+            class="mr-2"
+            matSuffix
+            [disabled]="hasPermissionToUpdateUserSettings !== true"
+            [for]="date"
+          >
+            <ion-icon
+              class="text-muted"
+              matDatepickerToggleIcon
+              name="calendar-clear-outline"
+            />
+          </mat-datepicker-toggle>
+          <mat-datepicker
+            #date
+            startView="multi-year"
+            [disabled]="hasPermissionToUpdateUserSettings !== true"
+            (monthSelected)="setMonthAndYear($event, date)"
+          />
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="w-100">
+          <mat-label i18n>Projected Total Amount</mat-label>
+          <input
+            formControlName="projectedTotalAmount"
+            matInput
+            step="100"
+            type="number"
+          />
+          <span class="ml-2" matTextSuffix>{{ currency }}</span>
+        </mat-form-field>
+      </form>
+    </div>
+    <div class="col-md-9 text-center">
+      <div class="chart-container mb-4">
+        @if (isLoading) {
+          <ngx-skeleton-loader
+            animation="pulse"
+            [theme]="{
+              height: '100%',
+              width: '100%'
+            }"
+          />
+        }
+        <canvas
+          #chartCanvas
+          class="h-100"
+          [style.display]="isLoading ? 'none' : 'block'"
+        ></canvas>
+      </div>
+    </div>
+  </div>
+</div>

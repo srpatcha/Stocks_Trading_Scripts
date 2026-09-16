@@ -1,0 +1,53 @@
+<form class="d-flex flex-column h-100">
+  <h1 i18n mat-dialog-title>Details for {{ data.symbol }}</h1>
+  <div class="flex-grow-1 py-3" mat-dialog-content>
+    <div class="mb-3">
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Date</mat-label>
+        <input
+          disabled
+          matInput
+          name="date"
+          [matDatepicker]="date"
+          [(ngModel)]="data.dateString"
+        />
+        <mat-datepicker-toggle class="mr-2" matSuffix [for]="date">
+          <ion-icon
+            class="text-muted"
+            matDatepickerToggleIcon
+            name="calendar-clear-outline"
+          />
+        </mat-datepicker-toggle>
+        <mat-datepicker #date disabled="true" />
+      </mat-form-field>
+    </div>
+    <div class="align-items-start d-flex">
+      <mat-form-field appearance="outline" class="w-100">
+        <mat-label i18n>Market Price</mat-label>
+        <input
+          matInput
+          name="marketPrice"
+          type="number"
+          [ngModel]="marketPrice()"
+          (ngModelChange)="marketPrice.set($event)"
+        />
+        <span class="ml-2" matTextSuffix>{{ data.currency }}</span>
+      </mat-form-field>
+      <button
+        class="ml-2 mt-1 no-min-width"
+        i18n-title
+        mat-button
+        title="Fetch market price"
+        (click)="onFetchSymbolForDate()"
+      >
+        <ion-icon class="text-muted" name="refresh-outline" />
+      </button>
+    </div>
+  </div>
+  <div class="justify-content-end" mat-dialog-actions>
+    <button i18n mat-button (click)="onCancel()">Cancel</button>
+    <button color="primary" mat-flat-button (click)="onUpdate()">
+      <ng-container i18n>Save</ng-container>
+    </button>
+  </div>
+</form>

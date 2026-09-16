@@ -1,0 +1,44 @@
+:host {
+  display: block;
+  min-height: 100svh;
+
+  &.has-info-message {
+    header {
+      height: calc(2 * var(--mat-toolbar-standard-height));
+
+      .info-message-container {
+        height: var(--mat-toolbar-standard-height);
+
+        .info-message-inner-container {
+          background-color: rgba(var(--palette-primary-500), 1);
+          height: var(--mat-toolbar-standard-height);
+          z-index: 999;
+
+          .info-message {
+            color: rgba(var(--light-primary-text));
+            font-size: 80%;
+            font-weight: 500;
+            max-width: 100%;
+
+            .a {
+              border: 1px solid rgba(var(--light-primary-text));
+              border-radius: 0.25rem;
+            }
+          }
+        }
+      }
+    }
+
+    main {
+      min-height: calc(100svh - 2 * var(--mat-toolbar-standard-height));
+    }
+  }
+
+  header {
+    height: var(--mat-toolbar-standard-height);
+  }
+
+  main {
+    min-height: calc(100svh - var(--mat-toolbar-standard-height));
+  }
+}

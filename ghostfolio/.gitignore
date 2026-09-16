@@ -1,0 +1,50 @@
+# See http://help.github.com/ignore-files/ for more about ignoring files.
+
+# compiled output
+/out-tsc
+/tmp
+
+# dependencies
+/node_modules
+npm-debug.log
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+
+# misc
+/.angular/cache
+.claude/settings.local.json
+.claude/worktrees
+.cursor/rules/nx-rules.mdc
+.env
+.env.prod
+.github/instructions/nx.instructions.md
+.mcp.json
+.nx/cache
+.nx/migrate-runs
+.nx/polygraph
+.nx/self-healing
+.nx/workspace-data
+/.sass-cache
+/connect.lock
+/coverage
+/dist
+/libpeerconnection.log
+testem.log
+/typings
+
+# System Files
+.DS_Store
+Thumbs.db

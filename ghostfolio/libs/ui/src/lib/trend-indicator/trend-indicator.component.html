@@ -1,0 +1,36 @@
+@if (isLoading) {
+  <ngx-skeleton-loader
+    animation="pulse"
+    appearance="circle"
+    [theme]="{
+      height: '1.8rem',
+      width: '1.8rem'
+    }"
+  />
+} @else {
+  @if (marketState === 'closed' && dateRange === '1d') {
+    <ion-icon class="text-muted" name="pause-circle-outline" [size]="size" />
+  } @else if (marketState === 'delayed' && dateRange === '1d') {
+    <ion-icon class="text-muted" name="time-outline" [size]="size" />
+  } @else if (value <= -0.0005) {
+    <ion-icon
+      class="text-danger"
+      name="arrow-down-circle-outline"
+      [class.rotate-45-down]="value > -0.01"
+      [size]="size"
+    />
+  } @else if (value > -0.0005 && value < 0.0005) {
+    <ion-icon
+      class="text-muted"
+      name="arrow-forward-circle-outline"
+      [size]="size"
+    />
+  } @else {
+    <ion-icon
+      class="text-success"
+      name="arrow-up-circle-outline"
+      [class.rotate-45-up]="value < 0.01"
+      [size]="size"
+    />
+  }
+}

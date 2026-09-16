@@ -1,0 +1,11 @@
+:host {
+  display: block;
+
+  .mat-mdc-dialog-content {
+    max-height: unset;
+
+    .chart-container {
+      aspect-ratio: 16 / 9;
+    }
+  }
+}

@@ -1,0 +1,112 @@
+import { SettingsStorageService } from '@ghostfolio/client/services/settings-storage.service';
+import { AuthDeviceDto } from '@ghostfolio/common/dtos';
+import {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON
+} from '@ghostfolio/common/interfaces';
+
+import { HttpClient } from '@angular/common/http';
+import { inject, Service } from '@angular/core';
+import {
+  startAuthentication,
+  startRegistration
+} from '@simplewebauthn/browser';
+import { of } from 'rxjs';
+import { catchError, switchMap, tap } from 'rxjs/operators';
+
+@Service()
+export class WebAuthnService {
+  private static readonly WEB_AUTH_N_DEVICE_ID = 'WEB_AUTH_N_DEVICE_ID';
+
+  private readonly http = inject(HttpClient);
+  private readonly settingsStorageService = inject(SettingsStorageService);
+
+  public isSupported() {
+    return typeof PublicKeyCredential !== 'undefined';
+  }
+
+  public isEnabled() {
+    return !!this.getDeviceId();
+  }
+
+  public register() {
+    return this.http
+      .get<PublicKeyCredentialCreationOptionsJSON>(
+        `/api/v1/auth/webauthn/generate-registration-options`,
+        {}
+      )
+      .pipe(
+        catchError((error) => {
+          console.warn('Could not register device', error);
+          return of(null);
+        }),
+        switchMap((registrationOptions) => {
+          if (!registrationOptions) {
+            throw new Error('Could not generate registration options');
+          }
+
+          return startRegistration({ optionsJSON: registrationOptions });
+        }),
+        switchMap((credential) => {
+          return this.http.post<AuthDeviceDto>(
+            `/api/v1/auth/webauthn/verify-attestation`,
+            { credential }
+          );
+        }),
+        tap(({ id }) =>
+          this.settingsStorageService.setSetting(
+            WebAuthnService.WEB_AUTH_N_DEVICE_ID,
+            id
+          )
+        )
+      );
+  }
+
+  public deregister() {
+    const deviceId = this.getDeviceId();
+
+    return this.http
+      .delete<AuthDeviceDto>(`/api/v1/auth-device/${deviceId}`)
+      .pipe(
+        catchError((error) => {
+          console.warn(`Could not deregister device ${deviceId}`, error);
+          return of(null);
+        }),
+        tap(() =>
+          this.settingsStorageService.removeSetting(
+            WebAuthnService.WEB_AUTH_N_DEVICE_ID
+          )
+        )
+      );
+  }
+
+  public login() {
+    const deviceId = this.getDeviceId();
+
+    return this.http
+      .post<PublicKeyCredentialRequestOptionsJSON>(
+        '/api/v1/auth/webauthn/generate-authentication-options',
+        { deviceId }
+      )
+      .pipe(
+        switchMap((optionsJSON) => {
+          return startAuthentication({ optionsJSON });
+        }),
+        switchMap((credential) => {
+          return this.http.post<{ authToken: string }>(
+            '/api/v1/auth/webauthn/verify-authentication',
+            {
+              credential,
+              deviceId
+            }
+          );
+        })
+      );
+  }
+
+  private getDeviceId() {
+    return this.settingsStorageService.getSetting(
+      WebAuthnService.WEB_AUTH_N_DEVICE_ID
+    );
+  }
+}

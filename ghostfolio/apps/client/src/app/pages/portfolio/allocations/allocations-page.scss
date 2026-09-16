@@ -1,0 +1,54 @@
+:host {
+  display: block;
+
+  .allocations-by-symbol {
+    gf-portfolio-proportion-chart {
+      max-width: 80vh;
+    }
+  }
+
+  .world-map-chart {
+    .mat-mdc-card {
+      .world-map-chart-container {
+        aspect-ratio: 16 / 9;
+      }
+    }
+  }
+
+  .mat-mdc-card {
+    .mat-mdc-card-header {
+      ::ng-deep {
+        .mat-mdc-card-header-text {
+          flex: 1 1 auto;
+          overflow: hidden;
+        }
+      }
+
+      gf-toggle {
+        font-size: 90%;
+      }
+    }
+  }
+
+  .mat-mdc-progress-bar {
+    --mat-progress-bar-active-indicator-height: 0.5rem;
+    --mat-progress-bar-track-height: 0.5rem;
+    border-radius: 0.25rem;
+
+    ::ng-deep {
+      .mdc-linear-progress__buffer-bar {
+        background-color: rgb(var(--palette-background-unselected-chip));
+      }
+    }
+  }
+}
+
+:host-context(.theme-dark) {
+  .mat-mdc-progress-bar {
+    ::ng-deep {
+      .mdc-linear-progress__buffer-bar {
+        background-color: rgb(var(--palette-background-unselected-chip-dark));
+      }
+    }
+  }
+}

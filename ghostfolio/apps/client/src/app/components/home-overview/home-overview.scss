@@ -1,0 +1,50 @@
+:host {
+  display: block;
+  height: 100%;
+
+  .chart-container {
+    aspect-ratio: 16 / 9;
+    height: auto;
+    max-width: 50rem;
+
+    // Fallback for aspect-ratio (using padding hack)
+    @supports not (aspect-ratio: 16 / 9) {
+      &::before {
+        float: left;
+        padding-top: 56.25%;
+        content: '';
+      }
+
+      &::after {
+        display: block;
+        content: '';
+        clear: both;
+      }
+    }
+
+    gf-line-chart {
+      bottom: 0;
+      left: 0;
+      right: 0;
+      top: 0;
+    }
+  }
+
+  mat-card {
+    &.holdings {
+      --mat-card-title-text-size: var(--mat-sys-title-medium-size);
+
+      mat-card-content {
+        scrollbar-width: none;
+
+        &::-webkit-scrollbar {
+          display: none;
+        }
+      }
+    }
+  }
+
+  .introduction {
+    max-width: 50rem;
+  }
+}

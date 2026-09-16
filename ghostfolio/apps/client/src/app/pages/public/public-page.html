@@ -1,0 +1,246 @@
+<div class="container">
+  <div class="row">
+    <div class="col">
+      <h1 class="h4 mb-3 text-center" i18n>
+        Hello, {{ publicPortfolioDetails?.alias ?? defaultAlias }} has shared a
+        <strong>Portfolio</strong> with you!
+      </h1>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-content>
+          <gf-value
+            i18n
+            size="large"
+            [colorizeSign]="true"
+            [isLoading]="isLoading"
+            [isPercent]="true"
+            [precision]="2"
+            [value]="
+              publicPortfolioDetails?.performance?.['1d']?.relativeChange
+            "
+            >Today</gf-value
+          >
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-content>
+          <gf-value
+            i18n
+            size="large"
+            [colorizeSign]="true"
+            [isLoading]="isLoading"
+            [isPercent]="true"
+            [precision]="2"
+            [value]="
+              publicPortfolioDetails?.performance?.['ytd']?.relativeChange
+            "
+            >This year</gf-value
+          >
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-md-4">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-content>
+          <gf-value
+            i18n
+            size="large"
+            [colorizeSign]="true"
+            [isLoading]="isLoading"
+            [isPercent]="true"
+            [precision]="2"
+            [value]="
+              publicPortfolioDetails?.performance?.['max']?.relativeChange
+            "
+            >From the beginning</gf-value
+          >
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+  <div class="proportion-charts row">
+    <div class="col-md-12 allocations-by-symbol">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="text-truncate" i18n>Holdings</mat-card-title>
+        </mat-card-header>
+        <mat-card-content>
+          <gf-portfolio-proportion-chart
+            class="mx-auto"
+            [data]="symbols"
+            [isInPercentage]="true"
+            [keys]="['symbol']"
+            [showLabels]="deviceType() !== 'mobile'"
+          />
+          <gf-holdings-table
+            [hasPermissionToOpenDetails]="false"
+            [hasPermissionToShowQuantities]="false"
+            [hasPermissionToShowValues]="false"
+            [holdings]="holdings"
+            [pageSize]="7"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+    @if (publicPortfolioDetails?.hasDetails) {
+      <div class="col-md-4">
+        <mat-card appearance="outlined" class="mb-3">
+          <mat-card-header class="overflow-hidden w-100">
+            <mat-card-title class="text-truncate" i18n
+              >Currencies</mat-card-title
+            >
+          </mat-card-header>
+          <mat-card-content>
+            <gf-portfolio-proportion-chart
+              [data]="positions"
+              [isInPercentage]="true"
+              [keys]="['currency']"
+              [maxItems]="10"
+            />
+          </mat-card-content>
+        </mat-card>
+      </div>
+    }
+    @if (publicPortfolioDetails?.hasDetails) {
+      <div class="col-md-4">
+        <mat-card appearance="outlined" class="mb-3">
+          <mat-card-header class="overflow-hidden w-100">
+            <mat-card-title class="text-truncate" i18n>Sectors</mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            <gf-portfolio-proportion-chart
+              [data]="sectors"
+              [isInPercentage]="true"
+              [keys]="['name']"
+              [maxItems]="10"
+            />
+          </mat-card-content>
+        </mat-card>
+      </div>
+    }
+    @if (publicPortfolioDetails?.hasDetails) {
+      <div class="col-md-4">
+        <mat-card appearance="outlined" class="mb-3">
+          <mat-card-header class="overflow-hidden w-100">
+            <mat-card-title class="text-truncate" i18n
+              >Continents</mat-card-title
+            >
+          </mat-card-header>
+          <mat-card-content>
+            <gf-portfolio-proportion-chart
+              [data]="continents"
+              [isInPercentage]="true"
+              [keys]="['name']"
+            />
+          </mat-card-content>
+        </mat-card>
+      </div>
+    }
+  </div>
+  @if (publicPortfolioDetails?.hasDetails) {
+    <div class="row world-map-chart">
+      <div class="col-lg">
+        <mat-card appearance="outlined" class="mb-3">
+          <mat-card-header class="overflow-hidden w-100">
+            <mat-card-title class="text-truncate" i18n>Regions</mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            <div class="world-map-chart-container">
+              <gf-world-map-chart
+                format="{0}%"
+                [countries]="countries"
+                [isInPercentage]="true"
+              />
+            </div>
+            <div class="row">
+              <div class="col-xs-12 col-md my-2">
+                <gf-value
+                  i18n
+                  size="large"
+                  [isPercent]="true"
+                  [value]="markets?.developedMarkets?.valueInPercentage"
+                  >Developed Markets</gf-value
+                >
+              </div>
+              <div class="col-xs-12 col-md my-2">
+                <gf-value
+                  i18n
+                  size="large"
+                  [isPercent]="true"
+                  [value]="markets?.emergingMarkets?.valueInPercentage"
+                  >Emerging Markets</gf-value
+                >
+              </div>
+              <div class="col-xs-12 col-md my-2">
+                <gf-value
+                  i18n
+                  size="large"
+                  [isPercent]="true"
+                  [value]="markets?.otherMarkets?.valueInPercentage"
+                  >Other Markets</gf-value
+                >
+              </div>
+              @if (markets?.[UNKNOWN_KEY]?.valueInPercentage > 0) {
+                <div class="col-xs-12 col-md my-2">
+                  <gf-value
+                    i18n
+                    size="large"
+                    [isPercent]="true"
+                    [value]="markets?.[UNKNOWN_KEY]?.valueInPercentage"
+                    >No data available</gf-value
+                  >
+                </div>
+              }
+            </div>
+          </mat-card-content>
+        </mat-card>
+      </div>
+    </div>
+  }
+  <div class="row" [class.d-none]="hasPermissionForSubscription">
+    <div class="col-md-12">
+      <mat-card appearance="outlined">
+        <mat-card-header class="overflow-hidden w-100">
+          <mat-card-title class="text-truncate" i18n
+            >Latest activities</mat-card-title
+          >
+        </mat-card-header>
+        <mat-card-content>
+          <gf-activities-table
+            [dataSource]="latestActivitiesDataSource"
+            [deviceType]="deviceType()"
+            [hasPermissionToCreateActivity]="false"
+            [hasPermissionToDeleteActivity]="false"
+            [hasPermissionToExportActivities]="false"
+            [hasPermissionToOpenDetails]="false"
+            [pageSize]="pageSize"
+            [showAccountColumn]="false"
+            [showActions]="false"
+            [sortDisabled]="true"
+          />
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+  <div class="row my-5">
+    <div class="col-md-10 offset-md-1">
+      <h2 class="h4 mb-1 text-center" i18n>
+        Would you like to <strong>refine</strong> your
+        <strong>personal investment strategy</strong>?
+      </h2>
+      <p class="lead mb-3 text-center" i18n>
+        Ghostfolio empowers you to keep track of your wealth.
+      </p>
+      <div class="py-2 text-center">
+        <a color="primary" href="https://ghostfol.io" mat-flat-button>
+          <ng-container i18n>Get Started</ng-container>
+        </a>
+      </div>
+    </div>
+  </div>
+</div>

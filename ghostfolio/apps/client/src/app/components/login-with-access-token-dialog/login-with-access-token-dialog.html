@@ -1,0 +1,85 @@
+<gf-dialog-header [title]="data.title" (closeButtonClicked)="onClose()" />
+
+<div class="py-3" mat-dialog-content>
+  <div class="align-items-center d-flex flex-column">
+    <form class="w-100">
+      @if (data.hasPermissionToUseAuthToken) {
+        <mat-form-field appearance="outline" class="without-hint w-100">
+          <mat-label i18n>Security Token</mat-label>
+          <input
+            matInput
+            [formControl]="accessTokenFormControl"
+            [type]="isAccessTokenHidden ? 'password' : 'text'"
+            (keydown.enter)="onLoginWithAccessToken(); $event.preventDefault()"
+          />
+          <button
+            class="mx-2"
+            mat-icon-button
+            matSuffix
+            type="button"
+            (click)="isAccessTokenHidden = !isAccessTokenHidden"
+          >
+            <ion-icon
+              class="mat-icon"
+              [name]="isAccessTokenHidden ? 'eye-outline' : 'eye-off-outline'"
+            />
+          </button>
+        </mat-form-field>
+      }
+
+      @if (
+        data.hasPermissionToUseAuthGoogle && data.hasPermissionToUseAuthToken
+      ) {
+        <div class="my-3 text-center text-muted" i18n>or</div>
+      }
+
+      @if (data.hasPermissionToUseAuthGoogle) {
+        <div class="d-flex flex-column">
+          <a
+            class="px-4 py-3 rounded-pill"
+            href="../api/v1/auth/google"
+            mat-stroked-button
+            ><img
+              class="mr-2"
+              src="../assets/icons/google.svg"
+              style="height: 1rem"
+            /><span i18n>Sign in with Google</span></a
+          >
+        </div>
+      }
+
+      @if (data.hasPermissionToUseAuthOidc) {
+        <div class="d-flex flex-column mt-2">
+          <a
+            class="px-4 py-3 rounded-pill"
+            href="../api/auth/oidc"
+            mat-stroked-button
+            ><ng-container i18n>Sign in with OpenID Connect</ng-container></a
+          >
+        </div>
+      }
+    </form>
+  </div>
+</div>
+
+<div mat-dialog-actions>
+  <div class="flex-grow-1">
+    <mat-checkbox color="primary" i18n (change)="onChangeStaySignedIn($event)"
+      >Stay signed in</mat-checkbox
+    >
+  </div>
+  <div>
+    @if (data.hasPermissionToUseAuthToken) {
+      <button
+        color="primary"
+        mat-flat-button
+        [disabled]="
+          !(accessTokenFormControl.dirty && accessTokenFormControl.valid)
+        "
+        (click)="onLoginWithAccessToken()"
+      >
+        <ng-container i18n>Sign in</ng-container>
+      </button>
+    }
+  </div>
+</div>

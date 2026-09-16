@@ -1,0 +1,307 @@
+<div class="container">
+  <div class="mb-3 row">
+    <div class="col-lg-4 mb-3 mb-lg-0">
+      <mat-card appearance="outlined">
+        <mat-card-content>
+          <gf-value
+            i18n
+            size="large"
+            [enableCopyToClipboardButton]="true"
+            [isLoading]="isLoading"
+            [value]="version"
+            >Version</gf-value
+          >
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-lg-4 mb-3 mb-lg-0">
+      <mat-card appearance="outlined">
+        <mat-card-content>
+          <gf-value
+            i18n
+            size="large"
+            [isLoading]="isLoading"
+            [locale]="user?.settings?.locale"
+            [value]="userCount"
+            >Users</gf-value
+          >
+        </mat-card-content>
+      </mat-card>
+    </div>
+    <div class="col-lg-4">
+      <mat-card appearance="outlined">
+        <mat-card-content>
+          <gf-value
+            i18n
+            size="large"
+            [isLoading]="isLoading"
+            [locale]="user?.settings?.locale"
+            [subLabel]="activitiesCountPerUser"
+            [value]="activitiesCount"
+            >Activities</gf-value
+          >
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <mat-card appearance="outlined" class="mb-3">
+        <mat-card-content>
+          <div class="d-flex my-3">
+            <div class="w-50" i18n>User Signup</div>
+            <div class="w-50">
+              <mat-slide-toggle
+                color="primary"
+                hideIcon="true"
+                [checked]="isUserSignupEnabled"
+                [disabled]="isLoading"
+                (change)="onEnableUserSignupModeChange($event)"
+              />
+            </div>
+          </div>
+          @if (hasPermissionToToggleReadOnlyMode) {
+            <div class="d-flex my-3">
+              <div class="w-50" i18n>Read-only Mode</div>
+              <div class="w-50">
+                <mat-slide-toggle
+                  color="primary"
+                  hideIcon="true"
+                  [checked]="isReadOnlyMode"
+                  [disabled]="isLoading"
+                  (change)="onReadOnlyModeChange($event)"
+                />
+              </div>
+            </div>
+          }
+          <div class="d-flex my-3">
+            <div class="w-50" i18n>Data Gathering</div>
+            <div class="w-50">
+              <mat-slide-toggle
+                color="primary"
+                hideIcon="true"
+                [checked]="isDataGatheringEnabled"
+                [disabled]="isLoading"
+                (change)="onEnableDataGatheringChange($event)"
+              />
+            </div>
+          </div>
+          @if (hasPermissionForSystemMessage) {
+            <div class="d-flex my-3">
+              <div class="w-50" i18n>System Message</div>
+              <div class="w-50">
+                @if (systemMessage) {
+                  <div class="align-items-center d-flex">
+                    <div class="text-truncate">
+                      {{ systemMessage | json }}
+                    </div>
+                    <button
+                      class="h-100 mx-1 no-min-width px-2"
+                      mat-button
+                      (click)="onDeleteSystemMessage()"
+                    >
+                      <ion-icon name="trash-outline" />
+                    </button>
+                  </div>
+                }
+                @if (!systemMessage) {
+                  <button
+                    class="mt-2"
+                    color="accent"
+                    mat-flat-button
+                    (click)="onSetSystemMessage()"
+                  >
+                    <ion-icon class="mr-1" name="information-circle-outline" />
+                    <span i18n>Set Message</span>
+                  </button>
+                }
+              </div>
+            </div>
+          }
+          <div class="d-flex my-3">
+            <div class="w-50" i18n>Housekeeping</div>
+            <div class="w-50">
+              <div class="align-items-start d-flex flex-column">
+                @if (hasPermissionToSyncDemoUserAccount) {
+                  <button
+                    class="mb-2"
+                    color="accent"
+                    mat-flat-button
+                    (click)="onSyncDemoUserAccount()"
+                  >
+                    <ion-icon class="mr-1" name="sync-outline" />
+                    <span i18n>Sync Demo User Account</span>
+                  </button>
+                }
+                <button color="warn" mat-flat-button (click)="onFlushCache()">
+                  <ion-icon class="mr-1" name="close-circle-outline" />
+                  <span i18n>Flush Cache</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </div>
+
+  @if (hasPermissionForSubscription) {
+    <div class="row">
+      <div class="col">
+        <mat-card appearance="outlined">
+          <mat-card-header>
+            <mat-card-title i18n>Coupons</mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            <div class="overflow-x-auto">
+              <table
+                class="gf-table w-100"
+                mat-table
+                [dataSource]="couponsDataSource"
+              >
+                <ng-container matColumnDef="code">
+                  <th *matHeaderCellDef class="px-1" mat-header-cell>
+                    <ng-container i18n>Code</ng-container>
+                  </th>
+                  <td *matCellDef="let element" class="px-1" mat-cell>
+                    <gf-value
+                      class="text-monospace"
+                      [enableCopyToClipboardButton]="true"
+                      [value]="element.code"
+                    />
+                  </td>
+                </ng-container>
+
+                <ng-container matColumnDef="duration">
+                  <th *matHeaderCellDef class="px-1 text-right" mat-header-cell>
+                    <ng-container i18n>Duration</ng-container>
+                  </th>
+                  <td
+                    *matCellDef="let element"
+                    class="px-1 text-right"
+                    mat-cell
+                  >
+                    {{ formatStringValue(element.duration) }}
+                  </td>
+                </ng-container>
+
+                <ng-container matColumnDef="createdAt">
+                  <th *matHeaderCellDef class="px-1" mat-header-cell>
+                    <ng-container i18n>Creation</ng-container>
+                  </th>
+                  <td *matCellDef="let element" class="px-1" mat-cell>
+                    @if (element.createdAt) {
+                      <gf-value
+                        [isDate]="true"
+                        [locale]="user?.settings?.locale"
+                        [value]="element.createdAt"
+                      />
+                    } @else {
+                      <span>-</span>
+                    }
+                  </td>
+                </ng-container>
+
+                <ng-container matColumnDef="actions" stickyEnd>
+                  <th
+                    *matHeaderCellDef
+                    class="px-1 text-right"
+                    mat-header-cell
+                  ></th>
+                  <td
+                    *matCellDef="let element"
+                    class="px-1 text-right"
+                    mat-cell
+                  >
+                    <button
+                      class="mx-1 no-min-width px-2"
+                      mat-button
+                      [matMenuTriggerFor]="couponActionsMenu"
+                      (click)="$event.stopPropagation()"
+                    >
+                      <ion-icon name="ellipsis-horizontal" />
+                    </button>
+                    <mat-menu
+                      #couponActionsMenu="matMenu"
+                      class="no-max-width"
+                      xPosition="before"
+                    >
+                      <button
+                        mat-menu-item
+                        (click)="onDeleteCoupon(element.code)"
+                      >
+                        <span class="align-items-center d-flex">
+                          <ion-icon class="mr-2" name="trash-outline" />
+                          <span i18n>Delete</span>
+                        </span>
+                      </button>
+                    </mat-menu>
+                  </td>
+                </ng-container>
+
+                <tr
+                  *matHeaderRowDef="couponsDisplayedColumns"
+                  mat-header-row
+                ></tr>
+                <tr
+                  *matRowDef="let row; columns: couponsDisplayedColumns"
+                  mat-row
+                ></tr>
+              </table>
+
+              @if (isLoading) {
+                <ngx-skeleton-loader
+                  animation="pulse"
+                  class="px-4 py-3"
+                  [theme]="{
+                    height: '1.5rem',
+                    width: '100%'
+                  }"
+                />
+              }
+            </div>
+          </mat-card-content>
+          <mat-card-actions align="end">
+            <form #couponForm="ngForm" class="align-items-stretch d-flex">
+              <mat-form-field appearance="outline" class="mr-1 without-hint">
+                <mat-select
+                  name="duration"
+                  [value]="couponDuration"
+                  (selectionChange)="onChangeCouponDuration($event.value)"
+                >
+                  <mat-option value="7 days">{{
+                    formatStringValue('7 days')
+                  }}</mat-option>
+                  <mat-option value="14 days">{{
+                    formatStringValue('14 days')
+                  }}</mat-option>
+                  <mat-option value="30 days">{{
+                    formatStringValue('30 days')
+                  }}</mat-option>
+                  <mat-option value="90 days">{{
+                    formatStringValue('90 days')
+                  }}</mat-option>
+                  <mat-option value="180 days">{{
+                    formatStringValue('180 days')
+                  }}</mat-option>
+                  <mat-option value="1 year">{{
+                    formatStringValue('1 year')
+                  }}</mat-option>
+                </mat-select>
+              </mat-form-field>
+              <button
+                class="h-auto rounded"
+                color="primary"
+                mat-flat-button
+                (click)="onAddCoupon()"
+              >
+                <ng-container i18n>Add</ng-container>
+              </button>
+            </form>
+          </mat-card-actions>
+        </mat-card>
+      </div>
+    </div>
+  }
+</div>

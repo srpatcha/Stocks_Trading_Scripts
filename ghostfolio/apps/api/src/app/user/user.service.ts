@@ -1,0 +1,877 @@
+import { ActivitiesService } from '@ghostfolio/api/app/activities/activities.service';
+import { SubscriptionService } from '@ghostfolio/api/app/subscription/subscription.service';
+import { environment } from '@ghostfolio/api/environments/environment';
+import { PortfolioChangedEvent } from '@ghostfolio/api/events/portfolio-changed.event';
+import { getRandomString } from '@ghostfolio/api/helper/string.helper';
+import { AccountClusterRiskCurrentInvestment } from '@ghostfolio/api/models/rules/account-cluster-risk/current-investment';
+import { AccountClusterRiskSingleAccount } from '@ghostfolio/api/models/rules/account-cluster-risk/single-account';
+import { AssetClassClusterRiskEquity } from '@ghostfolio/api/models/rules/asset-class-cluster-risk/equity';
+import { AssetClassClusterRiskFixedIncome } from '@ghostfolio/api/models/rules/asset-class-cluster-risk/fixed-income';
+import { CurrencyClusterRiskBaseCurrencyCurrentInvestment } from '@ghostfolio/api/models/rules/currency-cluster-risk/base-currency-current-investment';
+import { CurrencyClusterRiskCurrentInvestment } from '@ghostfolio/api/models/rules/currency-cluster-risk/current-investment';
+import { EconomicMarketClusterRiskDevelopedMarkets } from '@ghostfolio/api/models/rules/economic-market-cluster-risk/developed-markets';
+import { EconomicMarketClusterRiskEmergingMarkets } from '@ghostfolio/api/models/rules/economic-market-cluster-risk/emerging-markets';
+import { EmergencyFundCoverage } from '@ghostfolio/api/models/rules/emergency-fund/emergency-fund-coverage';
+import { EmergencyFundSetup } from '@ghostfolio/api/models/rules/emergency-fund/emergency-fund-setup';
+import { FeeRatioTotalInvestmentVolume } from '@ghostfolio/api/models/rules/fees/fee-ratio-total-investment-volume';
+import { BuyingPower } from '@ghostfolio/api/models/rules/liquidity/buying-power';
+import { RegionalMarketClusterRiskAsiaPacific } from '@ghostfolio/api/models/rules/regional-market-cluster-risk/asia-pacific';
+import { RegionalMarketClusterRiskEmergingMarkets } from '@ghostfolio/api/models/rules/regional-market-cluster-risk/emerging-markets';
+import { RegionalMarketClusterRiskEurope } from '@ghostfolio/api/models/rules/regional-market-cluster-risk/europe';
+import { RegionalMarketClusterRiskJapan } from '@ghostfolio/api/models/rules/regional-market-cluster-risk/japan';
+import { RegionalMarketClusterRiskNorthAmerica } from '@ghostfolio/api/models/rules/regional-market-cluster-risk/north-america';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import { I18nService } from '@ghostfolio/api/services/i18n/i18n.service';
+import { PrismaService } from '@ghostfolio/api/services/prisma/prisma.service';
+import { PropertyService } from '@ghostfolio/api/services/property/property.service';
+import { TagService } from '@ghostfolio/api/services/tag/tag.service';
+import {
+  DEFAULT_CURRENCY,
+  DEFAULT_DATE_RANGE,
+  DEFAULT_LANGUAGE_CODE,
+  DEFAULT_LOCALE,
+  PROPERTY_API_KEY_GHOSTFOLIO,
+  PROPERTY_IS_READ_ONLY_MODE,
+  PROPERTY_MAX_DAILY_REQUESTS,
+  PROPERTY_REFERRAL_PARTNERS,
+  PROPERTY_SYSTEM_MESSAGE,
+  TAG_ID_DRAFT,
+  TAG_ID_EXCLUDE_FROM_ANALYSIS,
+  THROTTLE_DAILY_KEY,
+  THROTTLE_DAILY_TTL
+} from '@ghostfolio/common/config';
+import { SubscriptionType } from '@ghostfolio/common/enums';
+import { resolveUserSettings } from '@ghostfolio/common/helper';
+import {
+  User as IUser,
+  ReferralPartner,
+  SystemMessage,
+  UserSettings
+} from '@ghostfolio/common/interfaces';
+import {
+  getPermissions,
+  hasRole,
+  permissions
+} from '@ghostfolio/common/permissions';
+import { getScopesOfAccess } from '@ghostfolio/common/scopes';
+import { UserWithSettings } from '@ghostfolio/common/types';
+import { PerformanceCalculationType } from '@ghostfolio/common/types/performance-calculation-type.type';
+
+import { Injectable, Logger } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
+import { Prisma, Role, User } from '@prisma/client';
+import { differenceInDays, subDays } from 'date-fns';
+import { isNil, without } from 'lodash';
+import { createHmac } from 'node:crypto';
+
+@Injectable()
+export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
+  public constructor(
+    private readonly activitiesService: ActivitiesService,
+    private readonly configurationService: ConfigurationService,
+    private readonly eventEmitter: EventEmitter2,
+    private readonly i18nService: I18nService,
+    private readonly prismaService: PrismaService,
+    private readonly propertyService: PropertyService,
+    private readonly subscriptionService: SubscriptionService,
+    private readonly tagService: TagService,
+    @InjectThrottlerStorage()
+    private readonly throttlerStorage: ThrottlerStorage
+  ) {}
+
+  public async count(args?: Prisma.UserCountArgs) {
+    return this.prismaService.user.count(args);
+  }
+
+  public createAccessToken({
+    password,
+    salt
+  }: {
+    password: string;
+    salt: string;
+  }): string {
+    const hash = createHmac('sha512', salt);
+    hash.update(password);
+
+    return hash.digest('hex');
+  }
+
+  public generateAccessToken({ userId }: { userId: string }) {
+    const accessToken = this.createAccessToken({
+      password: userId,
+      salt: getRandomString(10)
+    });
+
+    const hashedAccessToken = this.createAccessToken({
+      password: accessToken,
+      salt: this.configurationService.get('ACCESS_TOKEN_SALT')
+    });
+
+    return { accessToken, hashedAccessToken };
+  }
+
+  public async getUser({
+    impersonationUserId,
+    locale = DEFAULT_LOCALE,
+    scopes,
+    user
+  }: {
+    impersonationUserId: string;
+    locale?: string;
+    scopes: string[];
+    user: UserWithSettings;
+  }): Promise<IUser> {
+    const { id, permissions, settings, subscription } = user;
+
+    const [
+      access,
+      accounts,
+      activitiesGroupedByType,
+      impersonationUser,
+      tagsForUser
+    ] = await Promise.all([
+      this.prismaService.access.findMany({
+        include: {
+          user: true
+        },
+        orderBy: { alias: 'asc' },
+        where: { granteeUserId: id }
+      }),
+      this.prismaService.account.findMany({
+        include: { platform: true },
+        orderBy: {
+          name: 'asc'
+        },
+        where: {
+          userId: impersonationUserId || user.id
+        }
+      }),
+      this.prismaService.order.groupBy({
+        _min: { date: true },
+        by: ['type'],
+        orderBy: { _min: { date: 'asc' } },
+        where: { userId: impersonationUserId || user.id }
+      }),
+      impersonationUserId
+        ? this.user({ id: impersonationUserId })
+        : Promise.resolve<UserWithSettings>(null),
+      this.tagService.getTagsForUser(impersonationUserId || user.id)
+    ]);
+
+    const activitiesCount = impersonationUserId
+      ? (impersonationUser?.activitiesCount ?? 0)
+      : (user.activitiesCount ?? 0);
+
+    const activityTypes = activitiesGroupedByType.map(({ type }) => {
+      return type;
+    });
+
+    // The groupBy is ordered by the minimum date, thus the first group
+    // carries the date of the first activity
+    const dateOfFirstActivity =
+      activitiesGroupedByType[0]?._min.date ?? new Date();
+
+    const resolvedUserSettings = resolveUserSettings({
+      impersonationUserSettings: impersonationUser?.settings
+        ?.settings as UserSettings,
+      userSettings: settings.settings as UserSettings
+    });
+
+    let referralPartners: ReferralPartner[] = [];
+
+    if (
+      this.configurationService.get('ENABLE_FEATURE_SUBSCRIPTION') &&
+      subscription?.type === SubscriptionType.Basic
+    ) {
+      referralPartners = await this.propertyService.getByKey<ReferralPartner[]>(
+        PROPERTY_REFERRAL_PARTNERS
+      );
+    }
+
+    let systemMessage: SystemMessage | undefined;
+
+    const systemMessageProperty =
+      await this.propertyService.getByKey<SystemMessage>(
+        PROPERTY_SYSTEM_MESSAGE
+      );
+
+    if (
+      subscription?.type &&
+      systemMessageProperty?.targetGroups?.includes(subscription.type)
+    ) {
+      systemMessage = systemMessageProperty;
+    }
+
+    let tags = tagsForUser;
+
+    if (
+      this.configurationService.get('ENABLE_FEATURE_SUBSCRIPTION') &&
+      subscription?.type === SubscriptionType.Basic
+    ) {
+      tags = tags.filter(({ id }) => {
+        return [TAG_ID_DRAFT, TAG_ID_EXCLUDE_FROM_ANALYSIS].includes(id);
+      });
+    }
+
+    return {
+      activitiesCount,
+      activityTypes,
+      dateOfFirstActivity,
+      id,
+      permissions,
+      referralPartners,
+      scopes,
+      subscription,
+      systemMessage,
+      tags,
+      access: access.map((accessItem) => {
+        return {
+          alias: accessItem.alias,
+          expiresAt: accessItem.expiresAt,
+          id: accessItem.id,
+          lastUsedAt: accessItem.lastUsedAt,
+          scopes: getScopesOfAccess(accessItem)
+        };
+      }),
+      accounts: accounts.sort((a, b) => {
+        return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      }),
+      settings: {
+        ...resolvedUserSettings,
+        baseCurrency: resolvedUserSettings.baseCurrency ?? DEFAULT_CURRENCY,
+        locale: resolvedUserSettings.locale ?? locale
+      }
+    };
+  }
+
+  public async hasAdmin() {
+    const usersWithAdminRole = await this.users({
+      where: {
+        role: {
+          equals: 'ADMIN'
+        }
+      }
+    });
+
+    return usersWithAdminRole.length > 0;
+  }
+
+  public async isDailyRequestLimitExceeded({
+    user
+  }: {
+    user: UserWithSettings;
+  }) {
+    if (user.subscription?.type === SubscriptionType.Premium) {
+      return false;
+    }
+
+    const maxDailyRequests = await this.getMaxDailyRequests();
+
+    if (maxDailyRequests === undefined) {
+      return false;
+    }
+
+    try {
+      const { totalHits } = await this.throttlerStorage.increment(
+        `${THROTTLE_DAILY_KEY}-${user.id}`,
+        THROTTLE_DAILY_TTL,
+        maxDailyRequests,
+        THROTTLE_DAILY_TTL,
+        THROTTLE_DAILY_KEY
+      );
+
+      return totalHits > maxDailyRequests;
+    } catch (error) {
+      this.logger.error(error);
+
+      return false;
+    }
+  }
+
+  public async user(
+    userWhereUniqueInput: Prisma.UserWhereUniqueInput
+  ): Promise<UserWithSettings | null> {
+    const userFromDatabase = await this.prismaService.user.findUnique({
+      include: {
+        _count: {
+          select: {
+            activities: true
+          }
+        },
+        accounts: {
+          include: { platform: true }
+        },
+        analytics: true,
+        settings: true,
+        subscriptions: true
+      },
+      where: userWhereUniqueInput
+    });
+
+    if (!userFromDatabase) {
+      return null;
+    }
+
+    const {
+      _count,
+      accessToken,
+      accounts,
+      analytics,
+      authChallenge,
+      createdAt,
+      id,
+      provider,
+      role,
+      settings,
+      subscriptions,
+      thirdPartyId,
+      updatedAt
+    } = userFromDatabase;
+
+    const activitiesCount = _count?.activities ?? 0;
+
+    const user: UserWithSettings = {
+      accessToken,
+      accounts,
+      activitiesCount,
+      authChallenge,
+      createdAt,
+      id,
+      provider,
+      role,
+      settings: settings as UserWithSettings['settings'],
+      thirdPartyId,
+      updatedAt,
+      dataProviderGhostfolioDailyRequests:
+        analytics?.dataProviderGhostfolioDailyRequests ?? 0
+    };
+
+    if (user.settings) {
+      if (!user.settings.settings) {
+        user.settings.settings = {};
+      }
+    } else {
+      // Set default settings if needed
+      user.settings = {
+        settings: {},
+        updatedAt: new Date(),
+        userId: user.id
+      };
+    }
+
+    // Set default value for annual interest rate
+    if (!(user.settings.settings as UserSettings)?.annualInterestRate) {
+      (user.settings.settings as UserSettings).annualInterestRate = 5;
+    }
+
+    // Set default value for base currency
+    if (!(user.settings.settings as UserSettings)?.baseCurrency) {
+      (user.settings.settings as UserSettings).baseCurrency = DEFAULT_CURRENCY;
+    }
+
+    // Set default value for date range
+    (user.settings.settings as UserSettings).dateRange =
+      (user.settings.settings as UserSettings).viewMode === 'ZEN'
+        ? 'max'
+        : ((user.settings.settings as UserSettings)?.dateRange ??
+          DEFAULT_DATE_RANGE);
+
+    // Set default value for performance calculation type
+    if (!(user.settings.settings as UserSettings)?.performanceCalculationType) {
+      (user.settings.settings as UserSettings).performanceCalculationType =
+        PerformanceCalculationType.ROAI;
+    }
+
+    // Set default value for projected total amount
+    if (!(user.settings.settings as UserSettings)?.projectedTotalAmount) {
+      (user.settings.settings as UserSettings).projectedTotalAmount = 0;
+    }
+
+    // Set default value for safe withdrawal rate
+    if (!(user.settings.settings as UserSettings)?.safeWithdrawalRate) {
+      (user.settings.settings as UserSettings).safeWithdrawalRate = 0.04;
+    }
+
+    // Set default value for savings rate
+    if (!(user.settings.settings as UserSettings)?.savingsRate) {
+      (user.settings.settings as UserSettings).savingsRate = 0;
+    }
+
+    // Set default value for view mode
+    if (!(user.settings.settings as UserSettings).viewMode) {
+      (user.settings.settings as UserSettings).viewMode = 'DEFAULT';
+    }
+
+    (user.settings.settings as UserSettings).xRayRules = {
+      AccountClusterRiskCurrentInvestment:
+        new AccountClusterRiskCurrentInvestment(
+          undefined,
+          undefined,
+          undefined,
+          {}
+        ).getSettings(user.settings.settings),
+      AccountClusterRiskSingleAccount: new AccountClusterRiskSingleAccount(
+        undefined,
+        undefined,
+        undefined,
+        {}
+      ).getSettings(user.settings.settings),
+      AssetClassClusterRiskEquity: new AssetClassClusterRiskEquity(
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      AssetClassClusterRiskFixedIncome: new AssetClassClusterRiskFixedIncome(
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      BuyingPower: new BuyingPower(
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      CurrencyClusterRiskBaseCurrencyCurrentInvestment:
+        new CurrencyClusterRiskBaseCurrencyCurrentInvestment(
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings),
+      CurrencyClusterRiskCurrentInvestment:
+        new CurrencyClusterRiskCurrentInvestment(
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings),
+      EconomicMarketClusterRiskDevelopedMarkets:
+        new EconomicMarketClusterRiskDevelopedMarkets(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings),
+      EconomicMarketClusterRiskEmergingMarkets:
+        new EconomicMarketClusterRiskEmergingMarkets(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings),
+      EmergencyFundCoverage: new EmergencyFundCoverage(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      EmergencyFundSetup: new EmergencyFundSetup(
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      FeeRatioTotalInvestmentVolume: new FeeRatioTotalInvestmentVolume(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      RegionalMarketClusterRiskAsiaPacific:
+        new RegionalMarketClusterRiskAsiaPacific(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings),
+      RegionalMarketClusterRiskEmergingMarkets:
+        new RegionalMarketClusterRiskEmergingMarkets(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings),
+      RegionalMarketClusterRiskEurope: new RegionalMarketClusterRiskEurope(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      RegionalMarketClusterRiskJapan: new RegionalMarketClusterRiskJapan(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined
+      ).getSettings(user.settings.settings),
+      RegionalMarketClusterRiskNorthAmerica:
+        new RegionalMarketClusterRiskNorthAmerica(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined
+        ).getSettings(user.settings.settings)
+    };
+
+    let currentPermissions = getPermissions(user.role);
+
+    if (user.provider === 'ANONYMOUS') {
+      currentPermissions.push(permissions.deleteOwnUser);
+      currentPermissions.push(permissions.updateOwnAccessToken);
+    }
+
+    if (!(user.settings.settings as UserSettings).isExperimentalFeatures) {
+      // currentPermissions = without(
+      //   currentPermissions,
+      //   permissions.xyz
+      // );
+    }
+
+    if (this.configurationService.get('ENABLE_FEATURE_SUBSCRIPTION')) {
+      user.subscription = await this.subscriptionService.getSubscription({
+        subscriptions,
+        createdAt: user.createdAt
+      });
+
+      if (user.subscription?.type === SubscriptionType.Basic) {
+        const daysSinceRegistration = differenceInDays(
+          new Date(),
+          user.createdAt
+        );
+        let frequency = 7;
+
+        if (activitiesCount > 1000 || daysSinceRegistration > 720) {
+          frequency = 1;
+        } else if (activitiesCount > 750 || daysSinceRegistration > 360) {
+          frequency = 2;
+        } else if (activitiesCount > 500 || daysSinceRegistration > 180) {
+          frequency = 3;
+        } else if (activitiesCount > 250 || daysSinceRegistration > 60) {
+          frequency = 4;
+        } else if (daysSinceRegistration > 30) {
+          frequency = 5;
+        } else if (daysSinceRegistration > 15) {
+          frequency = 6;
+        }
+
+        if (analytics?.activityCount % frequency === 1) {
+          currentPermissions.push(permissions.enableSubscriptionInterstitial);
+        }
+
+        currentPermissions = without(
+          currentPermissions,
+          permissions.accessHoldingsChart,
+          permissions.createAccess,
+          permissions.createAssetProfileSplitOfOwnAssetProfile,
+          permissions.createMarketDataOfOwnAssetProfile,
+          permissions.createOwnTag,
+          permissions.createWatchlistItem,
+          permissions.deleteAssetProfileSplitOfOwnAssetProfile,
+          permissions.readAiPrompt,
+          permissions.readMarketDataOfOwnAssetProfile,
+          permissions.updateMarketDataOfOwnAssetProfile
+        );
+
+        // Reset benchmark
+        user.settings.settings.benchmark = undefined;
+
+        // Reset holdings view mode
+        user.settings.settings.holdingsViewMode = undefined;
+      } else if (user.subscription?.type === SubscriptionType.Premium) {
+        if (!hasRole(user, Role.DEMO)) {
+          currentPermissions.push(permissions.createApiKey);
+          currentPermissions.push(permissions.enableDataProviderGhostfolio);
+          currentPermissions.push(permissions.readMarketDataOfMarkets);
+          currentPermissions.push(permissions.reportDataGlitch);
+        }
+
+        currentPermissions = without(
+          currentPermissions,
+          permissions.deleteOwnUser
+        );
+
+        // Reset offer
+        user.subscription.offer.coupon = undefined;
+        user.subscription.offer.couponId = undefined;
+        user.subscription.offer.durationExtension = undefined;
+        user.subscription.offer.label = undefined;
+      }
+
+      if (
+        !hasRole(user, Role.DEMO) &&
+        (user.provider !== 'ANONYMOUS' ||
+          user.subscription?.type === SubscriptionType.Premium)
+      ) {
+        currentPermissions.push(permissions.requestOwnUserDeletion);
+      }
+
+      if (hasRole(user, Role.ADMIN)) {
+        currentPermissions.push(permissions.syncDemoUserAccount);
+      }
+    } else {
+      if (
+        this.configurationService.get('ENABLE_FEATURE_FEAR_AND_GREED_INDEX') ||
+        (await this.propertyService.getByKey<string>(
+          PROPERTY_API_KEY_GHOSTFOLIO
+        ))
+      ) {
+        currentPermissions.push(permissions.readMarketDataOfMarkets);
+      }
+    }
+
+    if (this.configurationService.get('ENABLE_FEATURE_READ_ONLY_MODE')) {
+      if (hasRole(user, Role.ADMIN)) {
+        currentPermissions.push(permissions.toggleReadOnlyMode);
+      }
+
+      const isReadOnlyMode = await this.propertyService.getByKey<boolean>(
+        PROPERTY_IS_READ_ONLY_MODE
+      );
+
+      if (isReadOnlyMode) {
+        currentPermissions = currentPermissions.filter((permission) => {
+          return !(
+            permission.startsWith('create') ||
+            permission.startsWith('delete') ||
+            permission.startsWith('update')
+          );
+        });
+      }
+    }
+
+    if (hasRole(user, Role.ADMIN)) {
+      if ((user.settings.settings as UserSettings).isExperimentalFeatures) {
+        currentPermissions.push(permissions.accessAdminControlBullBoard);
+      }
+
+      if (!environment.production) {
+        currentPermissions.push(permissions.impersonateAllUsers);
+      }
+    }
+
+    user.accounts = user.accounts.sort((a, b) => {
+      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    });
+
+    user.permissions = currentPermissions.sort();
+
+    return user;
+  }
+
+  public async users(params: {
+    skip?: number;
+    take?: number;
+    cursor?: Prisma.UserWhereUniqueInput;
+    where?: Prisma.UserWhereInput;
+    orderBy?: Prisma.UserOrderByWithRelationInput;
+  }): Promise<User[]> {
+    const { skip, take, cursor, where, orderBy } = params;
+    return this.prismaService.user.findMany({
+      skip,
+      take,
+      cursor,
+      where,
+      orderBy
+    });
+  }
+
+  public async createUser(
+    {
+      data
+    }: {
+      data: Prisma.UserCreateInput;
+    } = { data: {} }
+  ): Promise<User> {
+    if (!data.provider) {
+      data.provider = 'ANONYMOUS';
+    }
+
+    if (!data.role) {
+      const hasAdmin = await this.hasAdmin();
+
+      data.role = hasAdmin ? 'USER' : 'ADMIN';
+    }
+
+    const user = await this.prismaService.user.create({
+      data: {
+        ...data,
+        accounts: {
+          create: {
+            currency: DEFAULT_CURRENCY,
+            name: this.i18nService.getTranslation({
+              id: 'myAccount',
+              languageCode: DEFAULT_LANGUAGE_CODE // TODO
+            })
+          }
+        },
+        settings: {
+          create: {
+            settings: {
+              currency: DEFAULT_CURRENCY
+            }
+          }
+        }
+      }
+    });
+
+    if (this.configurationService.get('ENABLE_FEATURE_SUBSCRIPTION')) {
+      await this.prismaService.analytics.create({
+        data: {
+          user: { connect: { id: user.id } }
+        }
+      });
+    }
+
+    if (data.provider === 'ANONYMOUS') {
+      const { accessToken, hashedAccessToken } = this.generateAccessToken({
+        userId: user.id
+      });
+
+      await this.prismaService.user.update({
+        data: { accessToken: hashedAccessToken },
+        where: { id: user.id }
+      });
+
+      return { ...user, accessToken };
+    }
+
+    return user;
+  }
+
+  public async deleteUser(where: Prisma.UserWhereUniqueInput): Promise<User> {
+    try {
+      await this.prismaService.access.deleteMany({
+        where: { OR: [{ granteeUserId: where.id }, { userId: where.id }] }
+      });
+    } catch {}
+
+    try {
+      await this.prismaService.account.deleteMany({
+        where: { userId: where.id }
+      });
+    } catch {}
+
+    try {
+      await this.prismaService.analytics.delete({
+        where: { userId: where.id }
+      });
+    } catch {}
+
+    try {
+      await this.activitiesService.deleteActivities({
+        userId: where.id
+      });
+    } catch {}
+
+    try {
+      await this.prismaService.settings.delete({
+        where: { userId: where.id }
+      });
+    } catch {}
+
+    return this.prismaService.user.delete({
+      where
+    });
+  }
+
+  public async resetAnalytics() {
+    return this.prismaService.analytics.updateMany({
+      data: {
+        dataProviderGhostfolioDailyRequests: 0
+      },
+      where: {
+        updatedAt: {
+          gte: subDays(new Date(), 1)
+        }
+      }
+    });
+  }
+
+  public async updateUser({
+    data,
+    where
+  }: {
+    data: Prisma.UserUpdateInput;
+    where: Prisma.UserWhereUniqueInput;
+  }): Promise<User> {
+    return this.prismaService.user.update({
+      data,
+      where
+    });
+  }
+
+  public async updateUserSetting({
+    emitPortfolioChangedEvent,
+    userId,
+    userSettings
+  }: {
+    emitPortfolioChangedEvent: boolean;
+    userId: string;
+    userSettings: UserSettings;
+  }) {
+    const { settings } = await this.prismaService.settings.upsert({
+      create: {
+        settings: userSettings as unknown as Prisma.JsonObject,
+        user: {
+          connect: {
+            id: userId
+          }
+        }
+      },
+      update: {
+        settings: userSettings as unknown as Prisma.JsonObject
+      },
+      where: {
+        userId
+      }
+    });
+
+    if (emitPortfolioChangedEvent) {
+      this.eventEmitter.emit(
+        PortfolioChangedEvent.getName(),
+        new PortfolioChangedEvent({
+          userId
+        })
+      );
+    }
+
+    return settings;
+  }
+
+  private async getMaxDailyRequests() {
+    const value = await this.propertyService.getByKey<string>(
+      PROPERTY_MAX_DAILY_REQUESTS
+    );
+
+    if (isNil(value) || value === '') {
+      return undefined;
+    }
+
+    const maxDailyRequests = Number(value);
+
+    if (!Number.isInteger(maxDailyRequests) || maxDailyRequests < 0) {
+      this.logger.warn(
+        `The property ${PROPERTY_MAX_DAILY_REQUESTS} is not a non-negative integer ("${value}"), the daily request limit is not applied`
+      );
+
+      return undefined;
+    }
+
+    return maxDailyRequests;
+  }
+}

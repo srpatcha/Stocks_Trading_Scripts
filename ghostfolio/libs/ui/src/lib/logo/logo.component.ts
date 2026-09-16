@@ -1,0 +1,20 @@
+import {
+  CUSTOM_ELEMENTS_SCHEMA,
+  ChangeDetectionStrategy,
+  Component,
+  HostBinding,
+  Input
+} from '@angular/core';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  schemas: [CUSTOM_ELEMENTS_SCHEMA],
+  selector: 'gf-logo',
+  styleUrls: ['./logo.component.scss'],
+  templateUrl: './logo.component.html'
+})
+export class GfLogoComponent {
+  @HostBinding('class') @Input() size: 'large' | 'medium' = 'medium';
+  @Input() label: string;
+  @Input() showLabel = true;
+}

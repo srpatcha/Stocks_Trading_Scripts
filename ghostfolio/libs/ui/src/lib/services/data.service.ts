@@ -1,0 +1,987 @@
+import {
+  CreateAccessDto,
+  CreateAccountBalanceDto,
+  CreateAccountDto,
+  CreateOrderDto,
+  CreateTagDto,
+  CreateWatchlistItemDto,
+  DeleteOwnUserDto,
+  TransferBalanceDto,
+  UpdateAccessDto,
+  UpdateAccountDto,
+  UpdateBulkMarketDataDto,
+  UpdateOrderDto,
+  UpdateOwnAccessTokenDto,
+  UpdatePropertyDto,
+  UpdateTagDto,
+  UpdateUserSettingDto
+} from '@ghostfolio/common/dtos';
+import { DATE_FORMAT } from '@ghostfolio/common/helper';
+import {
+  Access,
+  AccessTokenResponse,
+  AccountBalancesResponse,
+  AccountResponse,
+  AccountsResponse,
+  ActivitiesResponse,
+  ActivityResponse,
+  AiPromptResponse,
+  ApiKeyResponse,
+  AssetProfileIdentifier,
+  AssetProfileResponse,
+  AssetProfilesResponse,
+  AssetResponse,
+  BenchmarkMarketDataDetailsResponse,
+  BenchmarkResponse,
+  CreateStripeCheckoutSessionResponse,
+  DataProviderHealthResponse,
+  DataProviderHistoricalResponse,
+  ExportResponse,
+  Filter,
+  ImportResponse,
+  InfoItem,
+  LookupResponse,
+  MarketDataOfMarketsResponse,
+  OAuthResponse,
+  PlatformsResponse,
+  PortfolioDetails,
+  PortfolioDividendsResponse,
+  PortfolioHoldingResponse,
+  PortfolioHoldingsResponse,
+  PortfolioInvestmentsResponse,
+  PortfolioPerformanceResponse,
+  PortfolioReportResponse,
+  PublicPortfolioResponse,
+  SymbolItem,
+  User,
+  UserItem,
+  WatchlistResponse
+} from '@ghostfolio/common/interfaces';
+import { filterGlobalPermissions } from '@ghostfolio/common/permissions';
+import type {
+  AiPromptMode,
+  DateRange,
+  GroupBy
+} from '@ghostfolio/common/types';
+import { translate } from '@ghostfolio/ui/i18n';
+
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { inject, Service } from '@angular/core';
+import { SortDirection } from '@angular/material/sort';
+import { utc } from '@date-fns/utc';
+import {
+  Account,
+  AccountBalance,
+  DataSource,
+  MarketData,
+  Order,
+  SymbolProfile,
+  Tag,
+  User as UserModel
+} from '@prisma/client';
+import { format, parseISO } from 'date-fns';
+import { cloneDeep, groupBy, isNumber } from 'lodash';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+@Service()
+export class DataService {
+  private readonly http = inject(HttpClient);
+
+  public buildFiltersAsQueryParams({ filters }: { filters?: Filter[] }) {
+    let params = new HttpParams();
+
+    if (filters && filters.length > 0) {
+      const {
+        ACCOUNT: filtersByAccount = [],
+        ASSET_CLASS: filtersByAssetClass = [],
+        ASSET_SUB_CLASS: filtersByAssetSubClass = [],
+        DATA_SOURCE: [filterByDataSource] = [],
+        HOLDING_TYPE: [filterByHoldingType] = [],
+        PRESET_ID: [filterByPresetId] = [],
+        SEARCH_QUERY: [filterBySearchQuery] = [],
+        SYMBOL: [filterBySymbol] = [],
+        TAG: filtersByTag = []
+      } = groupBy(filters, ({ type }) => {
+        return type;
+      });
+
+      if (filterByDataSource) {
+        params = params.append('dataSource', filterByDataSource.id);
+      }
+
+      if (filterBySymbol) {
+        params = params.append('symbol', filterBySymbol.id);
+      }
+
+      if (filtersByAccount.length > 0) {
+        params = params.append(
+          'accounts',
+          filtersByAccount
+            .map(({ id }) => {
+              return id;
+            })
+            .join(',')
+        );
+      }
+
+      if (filtersByAssetClass.length > 0) {
+        params = params.append(
+          'assetClasses',
+          filtersByAssetClass
+            .map(({ id }) => {
+              return id;
+            })
+            .join(',')
+        );
+      }
+
+      if (filtersByAssetSubClass.length > 0) {
+        params = params.append(
+          'assetSubClasses',
+          filtersByAssetSubClass
+            .map(({ id }) => {
+              return id;
+            })
+            .join(',')
+        );
+      }
+
+      if (filterByHoldingType) {
+        params = params.append('holdingType', filterByHoldingType.id);
+      }
+
+      if (filterByPresetId) {
+        params = params.append('presetId', filterByPresetId.id);
+      }
+
+      if (filterBySearchQuery) {
+        params = params.append('query', filterBySearchQuery.id);
+      }
+
+      if (filtersByTag.length > 0) {
+        params = params.append(
+          'tags',
+          filtersByTag
+            .map(({ id }) => {
+              return id;
+            })
+            .join(',')
+        );
+      }
+    }
+
+    return params;
+  }
+
+  public createStripeCheckoutSession({
+    couponId,
+    priceId
+  }: {
+    couponId?: string;
+    priceId: string;
+  }) {
+    return this.http.post<CreateStripeCheckoutSessionResponse>(
+      '/api/v1/subscription/stripe/checkout-session',
+      {
+        couponId,
+        priceId
+      }
+    );
+  }
+
+  public fetchAccount(aAccountId: string) {
+    return this.http.get<AccountResponse>(`/api/v1/account/${aAccountId}`);
+  }
+
+  public fetchAccountBalances(aAccountId: string) {
+    return this.http.get<AccountBalancesResponse>(
+      `/api/v1/account/${aAccountId}/balances`
+    );
+  }
+
+  public fetchAccounts({ filters }: { filters?: Filter[] } = {}) {
+    const params = this.buildFiltersAsQueryParams({ filters });
+
+    return this.http.get<AccountsResponse>('/api/v1/account', { params });
+  }
+
+  public fetchActivities({
+    activityTypes,
+    filters,
+    range,
+    skip,
+    sortColumn,
+    sortDirection,
+    take
+  }: {
+    activityTypes?: string[];
+    filters?: Filter[];
+    range?: DateRange;
+    skip?: number;
+    sortColumn?: string;
+    sortDirection?: SortDirection;
+    take?: number;
+  }): Observable<ActivitiesResponse> {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    if (activityTypes?.length) {
+      params = params.append('activityTypes', activityTypes.join(','));
+    }
+
+    if (range) {
+      params = params.append('range', range);
+    }
+
+    if (skip) {
+      params = params.append('skip', skip);
+    }
+
+    if (sortColumn) {
+      params = params.append('sortColumn', sortColumn);
+    }
+
+    if (sortDirection) {
+      params = params.append('sortDirection', sortDirection);
+    }
+
+    if (take) {
+      params = params.append('take', take);
+    }
+
+    return this.http.get<any>('/api/v1/activities', { params }).pipe(
+      map(({ activities, count }) => {
+        for (const activity of activities) {
+          activity.createdAt = parseISO(activity.createdAt);
+          activity.date = parseISO(activity.date);
+        }
+        return { activities, count };
+      })
+    );
+  }
+
+  public fetchActivity(aActivityId: string) {
+    return this.http
+      .get<ActivityResponse>(`/api/v1/activities/${aActivityId}`)
+      .pipe(
+        map((activity) => {
+          activity.createdAt = parseISO(
+            activity.createdAt as unknown as string
+          );
+          activity.date = parseISO(activity.date as unknown as string);
+
+          return activity;
+        })
+      );
+  }
+
+  public fetchDividends({
+    filters,
+    groupBy = 'month',
+    range
+  }: {
+    filters?: Filter[];
+    groupBy?: GroupBy;
+    range: DateRange;
+  }) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+    params = params.append('groupBy', groupBy);
+    params = params.append('range', range);
+
+    return this.http.get<PortfolioDividendsResponse>(
+      '/api/v1/portfolio/dividends',
+      {
+        params
+      }
+    );
+  }
+
+  public fetchDividendsImport({ dataSource, symbol }: AssetProfileIdentifier) {
+    return this.http.get<ImportResponse>(
+      `/api/v1/import/dividends/${dataSource}/${encodeURIComponent(symbol)}`
+    );
+  }
+
+  public fetchExchangeRateForDate({
+    date,
+    symbol
+  }: {
+    date: Date;
+    symbol: string;
+  }) {
+    return this.http.get<DataProviderHistoricalResponse>(
+      `/api/v1/exchange-rate/${encodeURIComponent(symbol)}/${format(date, DATE_FORMAT, { in: utc })}`
+    );
+  }
+
+  public deleteAccess(aId: string) {
+    return this.http.delete<void>(`/api/v1/access/${aId}`);
+  }
+
+  public deleteAccount(aId: string) {
+    return this.http.delete<Account>(`/api/v1/account/${aId}`);
+  }
+
+  public deleteAccountBalance(aId: string) {
+    return this.http.delete<AccountBalance>(`/api/v1/account-balance/${aId}`);
+  }
+
+  public deleteActivities({
+    activityTypes,
+    filters,
+    range
+  }: {
+    activityTypes?: string[];
+    filters?: Filter[];
+    range?: DateRange;
+  }) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    if (activityTypes?.length) {
+      params = params.append('activityTypes', activityTypes.join(','));
+    }
+
+    if (range) {
+      params = params.append('range', range);
+    }
+
+    return this.http.delete<number>('/api/v1/activities', { params });
+  }
+
+  public deleteActivity(aId: string) {
+    return this.http.delete<Order>(`/api/v1/activities/${aId}`);
+  }
+
+  public deleteBenchmark({ dataSource, symbol }: AssetProfileIdentifier) {
+    return this.http.delete<Partial<SymbolProfile>>(
+      `/api/v1/benchmarks/${dataSource}/${encodeURIComponent(symbol)}`
+    );
+  }
+
+  public deleteOwnUser(aData: DeleteOwnUserDto) {
+    return this.http.delete<UserModel>(`/api/v1/user`, { body: aData });
+  }
+
+  public deleteTag(aId: string) {
+    return this.http.delete<Tag>(`/api/v1/tags/${aId}`);
+  }
+
+  public deleteUser(aId: string) {
+    return this.http.delete<UserModel>(`/api/v1/user/${aId}`);
+  }
+
+  public deleteWatchlistItem({ dataSource, symbol }: AssetProfileIdentifier) {
+    return this.http.delete<void>(
+      `/api/v1/watchlist/${dataSource}/${encodeURIComponent(symbol)}`
+    );
+  }
+
+  public fetchAccesses() {
+    return this.http.get<Access[]>('/api/v1/access');
+  }
+
+  public fetchAsset({
+    dataSource,
+    symbol
+  }: AssetProfileIdentifier): Observable<AssetResponse> {
+    return this.http
+      .get<any>(`/api/v1/asset/${dataSource}/${encodeURIComponent(symbol)}`)
+      .pipe(
+        map((data) => {
+          for (const item of data.marketData) {
+            item.date = parseISO(item.date);
+          }
+          return data;
+        })
+      );
+  }
+
+  public fetchAssetProfiles({
+    filters,
+    skip,
+    sortColumn,
+    sortDirection,
+    take
+  }: {
+    filters?: Filter[];
+    skip?: number;
+    sortColumn?: string;
+    sortDirection?: SortDirection;
+    take: number;
+  }) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    if (skip) {
+      params = params.append('skip', skip);
+    }
+
+    if (sortColumn) {
+      params = params.append('sortColumn', sortColumn);
+    }
+
+    if (sortDirection) {
+      params = params.append('sortDirection', sortDirection);
+    }
+
+    if (take) {
+      params = params.append('take', take);
+    }
+
+    return this.http.get<AssetProfilesResponse>('/api/v1/asset-profiles', {
+      params
+    });
+  }
+
+  public fetchBenchmarkForUser({
+    dataSource,
+    filters,
+    range,
+    startDate,
+    symbol,
+    withExcludedAccounts
+  }: {
+    filters?: Filter[];
+    range: DateRange;
+    startDate: Date;
+    withExcludedAccounts?: boolean;
+  } & AssetProfileIdentifier) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    params = params.append('range', range);
+
+    if (withExcludedAccounts) {
+      params = params.append('withExcludedAccounts', withExcludedAccounts);
+    }
+
+    return this.http.get<BenchmarkMarketDataDetailsResponse>(
+      `/api/v1/benchmarks/${dataSource}/${encodeURIComponent(symbol)}/${format(startDate, DATE_FORMAT, { in: utc })}`,
+      { params }
+    );
+  }
+
+  public fetchBenchmarks() {
+    return this.http.get<BenchmarkResponse>('/api/v1/benchmarks');
+  }
+
+  public fetchDataProviderHealth(dataSource: DataSource) {
+    return this.http.get<DataProviderHealthResponse>(
+      `/api/v1/health/data-provider/${dataSource}`
+    );
+  }
+
+  public fetchExport({
+    activityIds,
+    activityTypes,
+    filters,
+    range,
+    withActivityIds = false
+  }: {
+    activityIds?: string[];
+    activityTypes?: string[];
+    filters?: Filter[];
+    range?: DateRange;
+    withActivityIds?: boolean;
+  } = {}) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    if (activityIds) {
+      params = params.append('activityIds', activityIds.join(','));
+    }
+
+    if (activityTypes?.length) {
+      params = params.append('activityTypes', activityTypes.join(','));
+    }
+
+    if (range) {
+      params = params.append('range', range);
+    }
+
+    return this.http
+      .get<ExportResponse>('/api/v1/export', {
+        params
+      })
+      .pipe(
+        map((exportResponse) => {
+          if (!withActivityIds) {
+            for (const activity of exportResponse.activities) {
+              delete (activity as Omit<typeof activity, 'id'> & { id?: string })
+                .id;
+            }
+          }
+
+          return exportResponse;
+        })
+      );
+  }
+
+  public fetchHoldingDetail({
+    dataSource,
+    symbol
+  }: AssetProfileIdentifier): Observable<
+    Omit<PortfolioHoldingResponse, 'dateOfFirstActivity'> & {
+      dateOfFirstActivity: Date | undefined;
+    }
+  > {
+    return this.http
+      .get<PortfolioHoldingResponse>(
+        `/api/v1/portfolio/holding/${dataSource}/${encodeURIComponent(symbol)}`
+      )
+      .pipe(
+        map((response) => {
+          const dateOfFirstActivity = response.dateOfFirstActivity
+            ? parseISO(response.dateOfFirstActivity)
+            : undefined;
+
+          return {
+            ...response,
+            dateOfFirstActivity
+          };
+        })
+      );
+  }
+
+  public fetchInfo(): InfoItem {
+    const info = cloneDeep((window as any).info);
+    const utmSource = window.localStorage.getItem('utm_source') as
+      'ios' | 'trusted-web-activity';
+
+    info.globalPermissions = filterGlobalPermissions(
+      info.globalPermissions,
+      utmSource
+    );
+
+    return info;
+  }
+
+  public fetchInvestments({
+    filters,
+    groupBy = 'month',
+    range
+  }: {
+    filters?: Filter[];
+    groupBy?: GroupBy;
+    range: DateRange;
+  }) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+    params = params.append('groupBy', groupBy);
+    params = params.append('range', range);
+
+    return this.http.get<PortfolioInvestmentsResponse>(
+      '/api/v1/portfolio/investments',
+      { params }
+    );
+  }
+
+  public fetchMarketDataBySymbol({
+    dataSource,
+    symbol
+  }: AssetProfileIdentifier): Observable<AssetProfileResponse> {
+    return this.http
+      .get<any>(
+        `/api/v1/asset-profiles/${dataSource}/${encodeURIComponent(symbol)}`
+      )
+      .pipe(
+        map((data) => {
+          for (const item of data.marketData) {
+            item.date = parseISO(item.date);
+          }
+
+          for (const item of data.splits ?? []) {
+            item.date = parseISO(item.date);
+          }
+
+          return data;
+        })
+      );
+  }
+
+  public fetchMarketDataOfMarkets({
+    includeHistoricalData
+  }: {
+    includeHistoricalData?: number;
+  }): Observable<MarketDataOfMarketsResponse> {
+    let params = new HttpParams();
+
+    if (includeHistoricalData) {
+      params = params.append('includeHistoricalData', includeHistoricalData);
+    }
+
+    return this.http.get<any>('/api/v1/market-data/markets', { params }).pipe(
+      map((data) => {
+        for (const item of data.fearAndGreedIndex.CRYPTOCURRENCIES
+          ?.historicalData ?? []) {
+          item.date = parseISO(item.date);
+        }
+
+        for (const item of data.fearAndGreedIndex.STOCKS?.historicalData ??
+          []) {
+          item.date = parseISO(item.date);
+        }
+
+        return data;
+      })
+    );
+  }
+
+  public fetchPlatforms() {
+    return this.http.get<PlatformsResponse>('/api/v1/platforms');
+  }
+
+  public fetchPortfolioDetails({
+    filters,
+    withMarkets = false
+  }: {
+    filters?: Filter[];
+    withMarkets?: boolean;
+  } = {}): Observable<PortfolioDetails> {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    if (withMarkets) {
+      params = params.append('withMarkets', withMarkets);
+    }
+
+    return this.http
+      .get<any>('/api/v1/portfolio/details', {
+        params
+      })
+      .pipe(
+        map((response) => {
+          if (response.holdings) {
+            for (const holding of response.holdings) {
+              holding.assetProfile.assetClassLabel = translate(
+                holding.assetProfile.assetClass
+              );
+
+              holding.assetProfile.assetSubClassLabel = translate(
+                holding.assetProfile.assetSubClass
+              );
+
+              holding.dateOfFirstActivity = holding.dateOfFirstActivity
+                ? parseISO(holding.dateOfFirstActivity)
+                : undefined;
+
+              holding.value = isNumber(holding.value)
+                ? holding.value
+                : holding.valueInPercentage;
+            }
+          }
+
+          if (response.summary?.dateOfFirstActivity) {
+            response.summary.dateOfFirstActivity = parseISO(
+              response.summary.dateOfFirstActivity
+            );
+          }
+
+          return response;
+        })
+      );
+  }
+
+  public fetchPortfolioHoldings({
+    filters,
+    range
+  }: {
+    filters?: Filter[];
+    range?: DateRange;
+  } = {}) {
+    let params = this.buildFiltersAsQueryParams({ filters });
+
+    if (range) {
+      params = params.append('range', range);
+    }
+
+    return this.http
+      .get<PortfolioHoldingsResponse>('/api/v1/portfolio/holdings', {
+        params
+      })
+      .pipe(
+        map((response) => {
+          if (response.holdings) {
+            for (const symbol of Object.keys(response.holdings)) {
+              response.holdings[symbol].assetProfile.assetClassLabel =
+                translate(response.holdings[symbol].assetProfile.assetClass);
+
+              response.holdings[symbol].assetProfile.assetSubClassLabel =
+                translate(response.holdings[symbol].assetProfile.assetSubClass);
+
+              response.holdings[symbol].dateOfFirstActivity = response.holdings[
+                symbol
+              ].dateOfFirstActivity
+                ? parseISO(response.holdings[symbol].dateOfFirstActivity)
+                : undefined;
+
+              response.holdings[symbol].value = isNumber(
+                response.holdings[symbol].value
+              )
+                ? response.holdings[symbol].value
+                : response.holdings[symbol].valueInPercentage;
+            }
+          }
+
+          return response;
+        })
+      );
+  }
+
+  public fetchPortfolioPerformance({
+    filters,
+    range,
+    withExcludedAccounts = false
+  }: {
+    filters?: Filter[];
+    range: DateRange;
+    withExcludedAccounts?: boolean;
+  }): Observable<PortfolioPerformanceResponse> {
+    let params = this.buildFiltersAsQueryParams({ filters });
+    params = params.append('range', range);
+
+    if (withExcludedAccounts) {
+      params = params.append('withExcludedAccounts', withExcludedAccounts);
+    }
+
+    return this.http
+      .get<any>(`/api/v2/portfolio/performance`, {
+        params
+      })
+      .pipe(
+        map((response) => {
+          if (response.dateOfFirstActivity) {
+            response.dateOfFirstActivity = parseISO(
+              response.dateOfFirstActivity
+            );
+          }
+
+          return response;
+        })
+      );
+  }
+
+  public fetchPortfolioReport() {
+    return this.http.get<PortfolioReportResponse>('/api/v1/portfolio/report');
+  }
+
+  public fetchPrompt({
+    filters,
+    mode
+  }: {
+    filters?: Filter[];
+    mode: AiPromptMode;
+  }) {
+    const params = this.buildFiltersAsQueryParams({ filters });
+
+    return this.http.get<AiPromptResponse>(`/api/v1/ai/prompt/${mode}`, {
+      params
+    });
+  }
+
+  public fetchPublicPortfolio(aAccessId: string) {
+    return this.http
+      .get<PublicPortfolioResponse>(`/api/v1/public/${aAccessId}/portfolio`)
+      .pipe(
+        map((response) => {
+          if (response.holdings) {
+            for (const holding of response.holdings) {
+              holding.assetProfile.assetClassLabel = translate(
+                holding.assetProfile.assetClass
+              );
+
+              holding.assetProfile.assetSubClassLabel = translate(
+                holding.assetProfile.assetSubClass
+              );
+            }
+          }
+
+          return response;
+        })
+      );
+  }
+
+  public fetchSymbolItem({
+    dataSource,
+    includeHistoricalData,
+    symbol
+  }: {
+    dataSource: DataSource | string;
+    includeHistoricalData?: number;
+    symbol: string;
+  }) {
+    let params = new HttpParams();
+
+    if (includeHistoricalData) {
+      params = params.append('includeHistoricalData', includeHistoricalData);
+    }
+
+    return this.http.get<SymbolItem>(
+      `/api/v1/symbol/${dataSource}/${encodeURIComponent(symbol)}`,
+      {
+        params
+      }
+    );
+  }
+
+  public fetchSymbols({
+    includeIndices = false,
+    query
+  }: {
+    includeIndices?: boolean;
+    query: string;
+  }) {
+    let params = new HttpParams().set('query', query);
+
+    if (includeIndices) {
+      params = params.append('includeIndices', includeIndices);
+    }
+
+    return this.http
+      .get<LookupResponse>('/api/v1/symbol/lookup', { params })
+      .pipe(
+        map(({ items }) => {
+          return items;
+        })
+      );
+  }
+
+  public fetchTags() {
+    return this.http.get<Tag[]>('/api/v1/tags');
+  }
+
+  public fetchWatchlist() {
+    return this.http.get<WatchlistResponse>('/api/v1/watchlist');
+  }
+
+  public loginAnonymous(accessToken: string) {
+    return this.http.post<OAuthResponse>('/api/v1/auth/anonymous', {
+      accessToken
+    });
+  }
+
+  public postAccess(aAccess: CreateAccessDto) {
+    return this.http.post<Access>('/api/v1/access', aAccess);
+  }
+
+  public postAccount(aAccount: CreateAccountDto) {
+    return this.http.post<Account>('/api/v1/account', aAccount);
+  }
+
+  public postAccountBalance(aAccountBalance: CreateAccountBalanceDto) {
+    return this.http.post<AccountBalance>(
+      '/api/v1/account-balance',
+      aAccountBalance
+    );
+  }
+
+  public postActivity(aOrder: CreateOrderDto) {
+    return this.http.post<Order>('/api/v1/activities', aOrder);
+  }
+
+  public postApiKey() {
+    return this.http.post<ApiKeyResponse>('/api/v1/api-keys', {});
+  }
+
+  public postBenchmark(benchmark: AssetProfileIdentifier) {
+    return this.http.post('/api/v1/benchmarks', benchmark);
+  }
+
+  public postMarketData({
+    dataSource,
+    marketData,
+    symbol
+  }: { marketData: UpdateBulkMarketDataDto } & AssetProfileIdentifier) {
+    const url = `/api/v1/market-data/${dataSource}/${encodeURIComponent(symbol)}`;
+
+    return this.http.post<MarketData>(url, marketData);
+  }
+
+  public postTag(aTag: CreateTagDto) {
+    return this.http.post<Tag>(`/api/v1/tags`, aTag);
+  }
+
+  public postUser() {
+    return this.http.post<UserItem>('/api/v1/user', {});
+  }
+
+  public postWatchlistItem(watchlistItem: CreateWatchlistItemDto) {
+    return this.http.post('/api/v1/watchlist', watchlistItem);
+  }
+
+  public putAccess(aAccess: UpdateAccessDto) {
+    return this.http.put<Access>(`/api/v1/access/${aAccess.id}`, aAccess);
+  }
+
+  public putAccount(aAccount: UpdateAccountDto) {
+    return this.http.put<UserItem>(`/api/v1/account/${aAccount.id}`, aAccount);
+  }
+
+  public putActivity(aOrder: UpdateOrderDto) {
+    return this.http.put<UserItem>(`/api/v1/activities/${aOrder.id}`, aOrder);
+  }
+
+  public putAdminSetting(key: string, aData: UpdatePropertyDto) {
+    return this.http.put<void>(`/api/v1/admin/settings/${key}`, aData);
+  }
+
+  public putHoldingTags({
+    dataSource,
+    symbol,
+    tags
+  }: { tags: Tag[] } & AssetProfileIdentifier) {
+    return this.http.put<void>(
+      `/api/v1/portfolio/holding/${dataSource}/${encodeURIComponent(symbol)}/tags`,
+      { tags }
+    );
+  }
+
+  public putTag(aTag: UpdateTagDto) {
+    return this.http.put<Tag>(`/api/v1/tags/${aTag.id}`, aTag);
+  }
+
+  public putUserSetting(aData: UpdateUserSettingDto) {
+    return this.http.put<User>('/api/v1/user/setting', aData);
+  }
+
+  public redeemCoupon(couponCode: string) {
+    return this.http.post('/api/v1/subscription/redeem-coupon', {
+      couponCode
+    });
+  }
+
+  public transferAccountBalance({
+    accountIdFrom,
+    accountIdTo,
+    balance
+  }: TransferBalanceDto) {
+    return this.http.post('/api/v1/account/transfer-balance', {
+      accountIdFrom,
+      accountIdTo,
+      balance
+    });
+  }
+
+  public updateOwnAccessToken(aAccessToken: UpdateOwnAccessTokenDto) {
+    return this.http.post<AccessTokenResponse>(
+      '/api/v1/user/access-token',
+      aAccessToken
+    );
+  }
+
+  public updateUserAccessToken(aUserId: string) {
+    return this.http.post<AccessTokenResponse>(
+      `/api/v1/user/${aUserId}/access-token`,
+      {}
+    );
+  }
+
+  public updateInfo() {
+    this.http.get<InfoItem>('/api/v1/info').subscribe((info) => {
+      const utmSource = window.localStorage.getItem('utm_source') as
+        'ios' | 'trusted-web-activity';
+
+      info.globalPermissions = filterGlobalPermissions(
+        info.globalPermissions,
+        utmSource
+      );
+
+      (window as any).info = info;
+    });
+  }
+}

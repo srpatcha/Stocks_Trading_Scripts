@@ -1,0 +1,45 @@
+:host {
+  color: rgb(var(--dark-primary-text));
+  display: block;
+
+  p {
+    a {
+      color: rgba(var(--palette-primary-500), 1);
+      font-weight: 500;
+
+      &:hover {
+        color: rgba(var(--palette-primary-300), 1);
+      }
+    }
+  }
+
+  .mat-mdc-card {
+    transition:
+      border-color 0.5s ease,
+      box-shadow 0.5s ease;
+
+    &.active {
+      border-color: currentColor;
+      box-shadow: 0 0 0 1px currentColor;
+    }
+
+    &:hover {
+      border-color: rgba(var(--palette-primary-500), 1);
+      box-shadow: 0 0 0 1px rgba(var(--palette-primary-500), 1);
+    }
+
+    ion-icon[name='checkmark-circle-outline'] {
+      color: rgba(var(--palette-primary-500), 1);
+    }
+
+    .badge-container {
+      left: 0;
+      right: 0;
+      top: 0;
+    }
+  }
+}
+
+:host-context(.theme-dark) {
+  color: rgb(var(--light-primary-text));
+}

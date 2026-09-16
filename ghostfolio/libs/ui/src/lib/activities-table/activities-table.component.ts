@@ -1,0 +1,386 @@
+import { DEFAULT_PAGE_SIZE } from '@ghostfolio/common/config';
+import { ConfirmationDialogType } from '@ghostfolio/common/enums';
+import { getLocale, isDraftActivity } from '@ghostfolio/common/helper';
+import {
+  Activity,
+  AssetProfileIdentifier
+} from '@ghostfolio/common/interfaces';
+import { internalRoutes } from '@ghostfolio/common/routes/routes';
+import { translate } from '@ghostfolio/ui/i18n';
+import { NotificationService } from '@ghostfolio/ui/notifications';
+
+import { SelectionModel } from '@angular/cdk/collections';
+import { CommonModule } from '@angular/common';
+import {
+  AfterViewInit,
+  CUSTOM_ELEMENTS_SCHEMA,
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  EventEmitter,
+  Input,
+  OnInit,
+  Output,
+  ViewChild,
+  computed,
+  inject,
+  input
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { FormControl, ReactiveFormsModule } from '@angular/forms';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatMenuModule } from '@angular/material/menu';
+import {
+  MatPaginator,
+  MatPaginatorModule,
+  PageEvent
+} from '@angular/material/paginator';
+import { MatSelectModule } from '@angular/material/select';
+import {
+  MatSort,
+  MatSortModule,
+  Sort,
+  SortDirection
+} from '@angular/material/sort';
+import { MatTableDataSource, MatTableModule } from '@angular/material/table';
+import { MatTooltipModule } from '@angular/material/tooltip';
+import { RouterModule } from '@angular/router';
+import { IonIcon } from '@ionic/angular/standalone';
+import { Type as ActivityType } from '@prisma/client';
+import { isUUID } from 'class-validator';
+import { addIcons } from 'ionicons';
+import {
+  alertCircleOutline,
+  calendarClearOutline,
+  cloudDownloadOutline,
+  cloudUploadOutline,
+  colorWandOutline,
+  copyOutline,
+  createOutline,
+  documentTextOutline,
+  ellipsisHorizontal,
+  ellipsisVertical,
+  tabletLandscapeOutline,
+  trashOutline
+} from 'ionicons/icons';
+import { NgxSkeletonLoaderModule } from 'ngx-skeleton-loader';
+
+import { GfActivityTypeComponent } from '../activity-type/activity-type.component';
+import { GfEntityLogoComponent } from '../entity-logo/entity-logo.component';
+import { GfNoActivitiesInfoComponent } from '../no-activities-info/no-activities-info.component';
+import { GfValueComponent } from '../value/value.component';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    CommonModule,
+    GfActivityTypeComponent,
+    GfEntityLogoComponent,
+    GfNoActivitiesInfoComponent,
+    GfValueComponent,
+    IonIcon,
+    MatButtonModule,
+    MatCheckboxModule,
+    MatFormFieldModule,
+    MatMenuModule,
+    MatPaginatorModule,
+    MatSelectModule,
+    MatSortModule,
+    MatTableModule,
+    MatTooltipModule,
+    NgxSkeletonLoaderModule,
+    ReactiveFormsModule,
+    RouterModule
+  ],
+  schemas: [CUSTOM_ELEMENTS_SCHEMA],
+  selector: 'gf-activities-table',
+  styleUrls: ['./activities-table.component.scss'],
+  templateUrl: './activities-table.component.html'
+})
+export class GfActivitiesTableComponent implements AfterViewInit, OnInit {
+  @Input() baseCurrency: string;
+  @Input() deviceType: string;
+  @Input() hasActivities: boolean;
+  @Input() hasPermissionToCreateActivity: boolean;
+  @Input() hasPermissionToDeleteActivity: boolean;
+  @Input() hasPermissionToExportActivities: boolean;
+  @Input() hasPermissionToFilterByType: boolean;
+  @Input() hasPermissionToImportActivities: boolean;
+  @Input() hasPermissionToOpenDetails = true;
+  @Input() hasPermissionToUpdateActivity: boolean;
+  @Input() locale = getLocale();
+  @Input() pageIndex: number;
+  @Input() pageSize = DEFAULT_PAGE_SIZE;
+  @Input() showActions = true;
+  @Input() sortColumn: string;
+  @Input() sortDirection: SortDirection;
+  @Input() sortDisabled = false;
+  @Input() totalItems = Number.MAX_SAFE_INTEGER;
+
+  @Output() activitiesDeleted = new EventEmitter<void>();
+  @Output() activityClicked = new EventEmitter<AssetProfileIdentifier>();
+  @Output() activityDeleted = new EventEmitter<string>();
+  @Output() export = new EventEmitter<void>();
+  @Output() exportDrafts = new EventEmitter<string[]>();
+  @Output() import = new EventEmitter<void>();
+  @Output() importDividends = new EventEmitter<AssetProfileIdentifier>();
+  @Output() pageChanged = new EventEmitter<PageEvent>();
+  @Output() selectedActivities = new EventEmitter<Activity[]>();
+  @Output() sortChanged = new EventEmitter<Sort>();
+  @Output() typesFilterChanged = new EventEmitter<string[]>();
+
+  @ViewChild(MatPaginator) paginator: MatPaginator;
+  @ViewChild(MatSort) sort: MatSort;
+
+  public hasDrafts = false;
+  public hasErrors = false;
+  public isDraftActivity = isDraftActivity;
+  public isUUID = isUUID;
+  public selectedRows = new SelectionModel<Activity>(true, []);
+  public typesFilter = new FormControl<string[]>([]);
+
+  public readonly activityTypes = input<ActivityType[]>([]);
+  public readonly dataSource = input.required<
+    MatTableDataSource<Activity> | undefined
+  >();
+  public readonly showAccountColumn = input(true);
+  public readonly showCheckbox = input(false);
+  public readonly showNameColumn = input(true);
+
+  protected readonly activityDialogRouterLinks = computed(() => {
+    const { clone, update } =
+      internalRoutes.portfolio.subRoutes.activities.subRoutes;
+
+    const routerLinks = new Map<
+      string,
+      { clone: string[]; update: string[] }
+    >();
+
+    for (const { id } of this.dataSource()?.data ?? []) {
+      routerLinks.set(id, {
+        clone: clone.routerLink(id),
+        update: update.routerLink(id)
+      });
+    }
+
+    return routerLinks;
+  });
+
+  protected readonly activityTypeOptions = computed(() => {
+    return (this.activityTypes() ?? [])
+      .map((activityType) => {
+        return { key: activityType, value: translate(activityType) };
+      })
+      .sort((a, b) => {
+        return a.value.localeCompare(b.value);
+      });
+  });
+
+  protected readonly displayedColumns = computed(() => {
+    let columns = [
+      'select',
+      'importStatus',
+      'icon',
+      'nameWithSymbol',
+      'type',
+      'date',
+      'quantity',
+      'unitPrice',
+      'fee',
+      'value',
+      'currency',
+      'valueInBaseCurrency',
+      'account',
+      'comment',
+      'actions'
+    ];
+
+    if (!this.showAccountColumn()) {
+      columns = columns.filter((column) => {
+        return column !== 'account';
+      });
+    }
+
+    if (!this.showCheckbox()) {
+      columns = columns.filter((column) => {
+        return column !== 'importStatus' && column !== 'select';
+      });
+    }
+
+    if (!this.showNameColumn()) {
+      columns = columns.filter((column) => {
+        return column !== 'nameWithSymbol';
+      });
+    }
+
+    return columns;
+  });
+
+  protected readonly isLoading = computed(() => {
+    return !this.dataSource();
+  });
+
+  private readonly notificationService = inject(NotificationService);
+
+  public constructor(private destroyRef: DestroyRef) {
+    addIcons({
+      alertCircleOutline,
+      calendarClearOutline,
+      cloudDownloadOutline,
+      cloudUploadOutline,
+      colorWandOutline,
+      copyOutline,
+      createOutline,
+      documentTextOutline,
+      ellipsisHorizontal,
+      ellipsisVertical,
+      tabletLandscapeOutline,
+      trashOutline
+    });
+  }
+
+  public ngOnInit() {
+    if (this.showCheckbox()) {
+      this.toggleAllRows();
+      this.selectedRows.changed
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe((selectedRows) => {
+          this.selectedActivities.emit(selectedRows.source.selected);
+        });
+    }
+
+    this.typesFilter.valueChanges
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((types) => {
+        this.typesFilterChanged.emit(types ?? []);
+      });
+  }
+
+  public ngAfterViewInit() {
+    const dataSource = this.dataSource();
+
+    if (dataSource) {
+      dataSource.paginator = this.paginator;
+    }
+
+    this.sort.sortChange.subscribe((value: Sort) => {
+      this.sortChanged.emit(value);
+    });
+  }
+
+  public areAllRowsSelected() {
+    const numSelectedRows = this.selectedRows.selected.length;
+    const numTotalRows = this.dataSource()?.data.length;
+    return numSelectedRows === numTotalRows;
+  }
+
+  public canClickActivity(activity: Activity) {
+    return (
+      this.hasPermissionToOpenDetails &&
+      isDraftActivity(activity) === false &&
+      ['BUY', 'DIVIDEND', 'SELL'].includes(activity.type)
+    );
+  }
+
+  public canDeleteActivities() {
+    return (
+      (this.dataSource()?.data.length ?? 0) > 0 &&
+      this.hasPermissionToDeleteActivity
+    );
+  }
+
+  public canExportActivities() {
+    return (
+      (this.dataSource()?.data.length ?? 0) > 0 &&
+      this.hasPermissionToExportActivities
+    );
+  }
+
+  public onChangePage(page: PageEvent) {
+    this.pageChanged.emit(page);
+  }
+
+  public onClickActivity(activity: Activity) {
+    if (this.showCheckbox()) {
+      if (!activity.error) {
+        this.selectedRows.toggle(activity);
+      }
+    } else if (this.canClickActivity(activity)) {
+      this.activityClicked.emit({
+        dataSource: activity.assetProfile.dataSource,
+        symbol: activity.assetProfile.symbol
+      });
+    }
+  }
+
+  public onDeleteActivities() {
+    this.notificationService.confirm({
+      confirmFn: () => {
+        this.activitiesDeleted.emit();
+      },
+      confirmType: ConfirmationDialogType.Warn,
+      title:
+        this.totalItems === 1
+          ? $localize`Do you really want to delete this activity?`
+          : $localize`Do you really want to delete these ${this.totalItems}:count: activities?`
+    });
+  }
+
+  public onDeleteActivity(aId: string) {
+    this.notificationService.confirm({
+      confirmFn: () => {
+        this.activityDeleted.emit(aId);
+      },
+      confirmType: ConfirmationDialogType.Warn,
+      title: $localize`Do you really want to delete this activity?`
+    });
+  }
+
+  public onExport() {
+    this.export.emit();
+  }
+
+  public onExportDraft(aActivityId: string) {
+    this.exportDrafts.emit([aActivityId]);
+  }
+
+  public onExportDrafts() {
+    this.exportDrafts.emit(
+      this.dataSource()
+        ?.filteredData.filter((activity) => {
+          return isDraftActivity(activity);
+        })
+        .map((activity) => {
+          return activity.id;
+        })
+    );
+  }
+
+  public onImport() {
+    this.import.emit();
+  }
+
+  public onImportDividends() {
+    this.importDividends.emit();
+  }
+
+  public onOpenComment(aComment: string) {
+    this.notificationService.alert({
+      title: aComment
+    });
+  }
+
+  public toggleAllRows() {
+    if (this.areAllRowsSelected()) {
+      this.selectedRows.clear();
+    } else {
+      this.dataSource()?.data.forEach((row) => {
+        this.selectedRows.select(row);
+      });
+    }
+
+    this.selectedActivities.emit(this.selectedRows.selected);
+  }
+}

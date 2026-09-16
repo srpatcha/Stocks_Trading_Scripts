@@ -1,0 +1,265 @@
+import {
+  getChartBorderColor,
+  getChartElementsOptions,
+  getTimeAxisOptions,
+  getValueAxisOptions,
+  getVerticalHoverLinePlugin,
+  getZeroLineAnnotation,
+  transformTickToAbbreviation
+} from '@ghostfolio/common/chart-helper';
+import { primaryColorRgb, secondaryColorRgb } from '@ghostfolio/common/config';
+import { getLocale, parseDate } from '@ghostfolio/common/helper';
+import { LineChartItem } from '@ghostfolio/common/interfaces';
+import { InvestmentItem } from '@ghostfolio/common/interfaces/investment-item.interface';
+import { ColorScheme, GroupBy } from '@ghostfolio/common/types';
+import {
+  getTimeSeriesTooltipOptions,
+  registerChartConfiguration
+} from '@ghostfolio/ui/chart';
+
+import {
+  ChangeDetectionStrategy,
+  Component,
+  type ElementRef,
+  Input,
+  OnChanges,
+  OnDestroy,
+  viewChild
+} from '@angular/core';
+import {
+  BarController,
+  BarElement,
+  Chart,
+  ChartData,
+  LinearScale,
+  LineController,
+  LineElement,
+  PointElement,
+  type ScriptableLineSegmentContext,
+  TimeScale,
+  Tooltip,
+  type TooltipOptions
+} from 'chart.js';
+import 'chartjs-adapter-date-fns';
+import { type AnnotationOptions } from 'chartjs-plugin-annotation';
+import { isFuture } from 'date-fns';
+import { NgxSkeletonLoaderModule } from 'ngx-skeleton-loader';
+
+@Component({
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [NgxSkeletonLoaderModule],
+  selector: 'gf-investment-chart',
+  styleUrls: ['./investment-chart.component.scss'],
+  templateUrl: './investment-chart.component.html'
+})
+export class GfInvestmentChartComponent implements OnChanges, OnDestroy {
+  @Input() public benchmarkDataItems: InvestmentItem[] = [];
+  @Input() public benchmarkDataLabel = '';
+  @Input() public colorScheme: ColorScheme;
+  @Input() public currency: string;
+  @Input() public groupBy: GroupBy;
+  @Input() public historicalDataItems: LineChartItem[] = [];
+  @Input() public isInPercentage = false;
+  @Input() public isLoading = false;
+  @Input() public locale = getLocale();
+  @Input() public savingsRate = 0;
+
+  private readonly chartCanvas =
+    viewChild.required<ElementRef<HTMLCanvasElement>>('chartCanvas');
+
+  private chart: Chart<'bar' | 'line'>;
+  private investments: InvestmentItem[];
+  private values: LineChartItem[];
+
+  public constructor() {
+    Chart.register(
+      BarController,
+      BarElement,
+      LinearScale,
+      LineController,
+      LineElement,
+      PointElement,
+      TimeScale,
+      Tooltip
+    );
+
+    registerChartConfiguration();
+  }
+
+  public ngOnChanges() {
+    if (this.benchmarkDataItems && this.historicalDataItems) {
+      this.initialize();
+    }
+  }
+
+  public ngOnDestroy() {
+    this.chart?.destroy();
+  }
+
+  private initialize() {
+    // Create a clone
+    this.investments = this.benchmarkDataItems.map((item) =>
+      Object.assign({}, item)
+    );
+    this.values = this.historicalDataItems.map((item) =>
+      Object.assign({}, item)
+    );
+
+    const chartData: ChartData<'bar' | 'line'> = {
+      labels: this.historicalDataItems.map(({ date }) => {
+        return parseDate(date);
+      }),
+      datasets: [
+        {
+          backgroundColor: `rgb(${secondaryColorRgb.r}, ${secondaryColorRgb.g}, ${secondaryColorRgb.b})`,
+          borderColor: `rgb(${secondaryColorRgb.r}, ${secondaryColorRgb.g}, ${secondaryColorRgb.b})`,
+          borderWidth: this.groupBy ? 0 : 1,
+          data: this.investments.map(({ date, investment }) => {
+            return {
+              x: parseDate(date)?.getTime() ?? null,
+              y: this.isInPercentage ? investment * 100 : investment
+            };
+          }),
+          label: this.benchmarkDataLabel,
+          segment: {
+            borderColor: (context) =>
+              this.isInFuture(
+                context,
+                `rgba(${secondaryColorRgb.r}, ${secondaryColorRgb.g}, ${secondaryColorRgb.b}, 0.67)`
+              ),
+            borderDash: (context) => this.isInFuture(context, [2, 2])
+          },
+          stepped: true
+        },
+        {
+          borderColor: `rgb(${primaryColorRgb.r}, ${primaryColorRgb.g}, ${primaryColorRgb.b})`,
+          borderWidth: 2,
+          data: this.values.map(({ date, value }) => {
+            return {
+              x: parseDate(date)?.getTime() ?? null,
+              y: this.isInPercentage ? value * 100 : value
+            };
+          }),
+          fill: false,
+          label: $localize`Total Amount`,
+          pointRadius: 0,
+          segment: {
+            borderColor: (context) =>
+              this.isInFuture(
+                context,
+                `rgba(${primaryColorRgb.r}, ${primaryColorRgb.g}, ${primaryColorRgb.b}, 0.67)`
+              ),
+            borderDash: (context) => this.isInFuture(context, [2, 2])
+          }
+        }
+      ]
+    };
+
+    if (this.chartCanvas) {
+      if (this.chart) {
+        this.chart.data = chartData;
+        this.chart.options.plugins ??= {};
+        this.chart.options.plugins.tooltip =
+          this.getTooltipPluginConfiguration();
+
+        const annotations = this.chart.options.plugins.annotation
+          ?.annotations as Record<string, AnnotationOptions<'line'>>;
+        if (this.savingsRate && annotations.savingsRate) {
+          annotations.savingsRate.value = this.savingsRate;
+        }
+
+        this.chart.update();
+      } else {
+        this.chart = new Chart<'bar' | 'line'>(
+          this.chartCanvas().nativeElement,
+          {
+            data: chartData,
+            options: {
+              animation: false,
+              elements: getChartElementsOptions(this.colorScheme),
+              interaction: { intersect: false, mode: 'index' },
+              maintainAspectRatio: true,
+              plugins: {
+                annotation: {
+                  annotations: {
+                    savingsRate: this.savingsRate
+                      ? {
+                          borderColor: `rgba(${primaryColorRgb.r}, ${primaryColorRgb.g}, ${primaryColorRgb.b}, 0.75)`,
+                          borderWidth: 1,
+                          label: {
+                            backgroundColor: `rgb(${primaryColorRgb.r}, ${primaryColorRgb.g}, ${primaryColorRgb.b})`,
+                            borderRadius: 2,
+                            color: 'white',
+                            content: $localize`Savings Rate`,
+                            display: true,
+                            font: { size: 10, weight: 'normal' },
+                            padding: {
+                              x: 4,
+                              y: 2
+                            },
+                            position: 'start'
+                          },
+                          scaleID: 'y',
+                          type: 'line',
+                          value: this.savingsRate
+                        }
+                      : undefined,
+                    yAxis: getZeroLineAnnotation(this.colorScheme)
+                  }
+                },
+                legend: {
+                  display: false
+                },
+                tooltip: this.getTooltipPluginConfiguration(),
+                verticalHoverLine: {
+                  color: getChartBorderColor(this.colorScheme)
+                }
+              },
+              responsive: true,
+              scales: {
+                x: getTimeAxisOptions({
+                  borderWidth: this.groupBy ? 0 : 1,
+                  colorScheme: this.colorScheme,
+                  locale: this.locale
+                }),
+                y: getValueAxisOptions({
+                  colorScheme: this.colorScheme,
+                  display: !this.isInPercentage,
+                  tickCallback: (tickValue) => {
+                    return transformTickToAbbreviation(Number(tickValue));
+                  }
+                })
+              }
+            },
+            plugins: [
+              getVerticalHoverLinePlugin(this.chartCanvas(), this.colorScheme)
+            ],
+            type: this.groupBy ? 'bar' : 'line'
+          }
+        );
+      }
+    }
+  }
+
+  private getTooltipPluginConfiguration(): Partial<
+    TooltipOptions<'bar' | 'line'>
+  > {
+    return getTimeSeriesTooltipOptions<'bar' | 'line'>({
+      colorScheme: this.colorScheme,
+      currency: this.isInPercentage ? undefined : this.currency,
+      groupBy: this.groupBy,
+      locale: this.isInPercentage ? undefined : this.locale,
+      unit: this.isInPercentage ? '%' : undefined
+    });
+  }
+
+  private isInFuture<T>(aContext: ScriptableLineSegmentContext, aValue: T) {
+    const xValue = aContext?.p1?.parsed?.x;
+
+    if (xValue == null) {
+      return undefined;
+    }
+
+    return isFuture(new Date(xValue)) ? aValue : undefined;
+  }
+}

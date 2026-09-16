@@ -1,0 +1,616 @@
+import { AccountBalanceService } from '@ghostfolio/api/app/account-balance/account-balance.service';
+import { AccountService } from '@ghostfolio/api/app/account/account.service';
+import { ActivitiesService } from '@ghostfolio/api/app/activities/activities.service';
+import {
+  activityDummyData,
+  assetProfileDummyData,
+  userDummyData
+} from '@ghostfolio/api/app/portfolio/calculator/portfolio-calculator-test-utils';
+import { PortfolioCalculatorFactory } from '@ghostfolio/api/app/portfolio/calculator/portfolio-calculator.factory';
+import { CurrentRateService } from '@ghostfolio/api/app/portfolio/current-rate.service';
+import { CurrentRateServiceMock } from '@ghostfolio/api/app/portfolio/current-rate.service.mock';
+import { RedisCacheService } from '@ghostfolio/api/app/redis-cache/redis-cache.service';
+import { RedisCacheServiceMock } from '@ghostfolio/api/app/redis-cache/redis-cache.service.mock';
+import { AssetProfileSplitService } from '@ghostfolio/api/services/asset-profile-split/asset-profile-split.service';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import { DataProviderService } from '@ghostfolio/api/services/data-provider/data-provider.service';
+import { ExchangeRateDataService } from '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service';
+import { ExchangeRateDataServiceMock } from '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service.mock';
+import { PortfolioSnapshotService } from '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service';
+import { PortfolioSnapshotServiceMock } from '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service.mock';
+import { parseDate } from '@ghostfolio/common/helper';
+import { TimelinePosition } from '@ghostfolio/common/models';
+import { PerformanceCalculationType } from '@ghostfolio/common/types/performance-calculation-type.type';
+
+import { DataSource } from '@prisma/client';
+import { Big } from 'big.js';
+import { eachDayOfInterval } from 'date-fns';
+import { randomUUID } from 'node:crypto';
+
+jest.mock('@ghostfolio/api/app/portfolio/current-rate.service', () => {
+  return {
+    CurrentRateService: jest.fn().mockImplementation(() => {
+      return CurrentRateServiceMock;
+    })
+  };
+});
+
+jest.mock(
+  '@ghostfolio/api/services/exchange-rate-data/exchange-rate-data.service',
+  () => {
+    return {
+      ExchangeRateDataService: jest.fn().mockImplementation(() => {
+        return ExchangeRateDataServiceMock;
+      })
+    };
+  }
+);
+
+jest.mock(
+  '@ghostfolio/api/services/queues/portfolio-snapshot/portfolio-snapshot.service',
+  () => {
+    return {
+      PortfolioSnapshotService: jest.fn().mockImplementation(() => {
+        return PortfolioSnapshotServiceMock;
+      })
+    };
+  }
+);
+
+jest.mock('@ghostfolio/api/app/redis-cache/redis-cache.service', () => {
+  return {
+    RedisCacheService: jest.fn().mockImplementation(() => {
+      return RedisCacheServiceMock;
+    })
+  };
+});
+
+describe('PortfolioCalculator', () => {
+  let accountBalanceService: AccountBalanceService;
+  let accountService: AccountService;
+  let activitiesService: ActivitiesService;
+  let configurationService: ConfigurationService;
+  let currentRateService: CurrentRateService;
+  let dataProviderService: DataProviderService;
+  let exchangeRateDataService: ExchangeRateDataService;
+  let portfolioCalculatorFactory: PortfolioCalculatorFactory;
+  let portfolioSnapshotService: PortfolioSnapshotService;
+  let redisCacheService: RedisCacheService;
+
+  beforeEach(() => {
+    PortfolioSnapshotServiceMock.reset();
+    RedisCacheServiceMock.reset();
+
+    configurationService = new ConfigurationService();
+
+    exchangeRateDataService = new ExchangeRateDataService(
+      null,
+      null,
+      null,
+      null
+    );
+
+    accountBalanceService = new AccountBalanceService(
+      null,
+      exchangeRateDataService,
+      null
+    );
+
+    accountService = new AccountService(
+      accountBalanceService,
+      null,
+      exchangeRateDataService,
+      null,
+      null
+    );
+
+    redisCacheService = new RedisCacheService(null, configurationService);
+
+    dataProviderService = new DataProviderService(
+      configurationService,
+      null,
+      null,
+      null,
+      null,
+      redisCacheService
+    );
+
+    currentRateService = new CurrentRateService(
+      null,
+      dataProviderService,
+      null
+    );
+
+    activitiesService = new ActivitiesService(
+      accountBalanceService,
+      accountService,
+      {
+        getSplitsByUserId: jest.fn().mockResolvedValue([])
+      } as unknown as AssetProfileSplitService,
+      null,
+      null,
+      dataProviderService,
+      null,
+      exchangeRateDataService,
+      null,
+      null,
+      null,
+      null
+    );
+
+    portfolioSnapshotService = new PortfolioSnapshotService(null, null);
+
+    portfolioCalculatorFactory = new PortfolioCalculatorFactory(
+      configurationService,
+      currentRateService,
+      exchangeRateDataService,
+      portfolioSnapshotService,
+      redisCacheService
+    );
+  });
+
+  describe('Cash Performance', () => {
+    it('should calculate performance for cash assets in CHF default currency', async () => {
+      jest.useFakeTimers().setSystemTime(parseDate('2025-01-01').getTime());
+
+      const accountId = randomUUID();
+
+      jest
+        .spyOn(accountBalanceService, 'getAccountBalances')
+        .mockResolvedValue({
+          balances: [
+            {
+              accountId,
+              date: parseDate('2023-12-31'),
+              id: randomUUID(),
+              value: 1000,
+              valueInBaseCurrency: 850
+            },
+            {
+              accountId,
+              date: parseDate('2024-12-31'),
+              id: randomUUID(),
+              value: 2000,
+              valueInBaseCurrency: 1800
+            },
+            {
+              // Ignored future account balance
+              accountId,
+              date: parseDate('2050-12-31'),
+              id: randomUUID(),
+              value: 0,
+              valueInBaseCurrency: 0
+            }
+          ]
+        });
+
+      jest.spyOn(accountService, 'getCashDetails').mockResolvedValue({
+        accounts: [
+          {
+            balance: 2000,
+            comment: null,
+            createdAt: parseDate('2023-12-31'),
+            currency: 'USD',
+            id: accountId,
+            name: 'USD',
+            platformId: null,
+            updatedAt: parseDate('2023-12-31'),
+            userId: userDummyData.id
+          }
+        ],
+        balanceInBaseCurrency: 1820
+      });
+
+      jest
+        .spyOn(dataProviderService, 'getDataSourceForExchangeRates')
+        .mockReturnValue(DataSource.YAHOO);
+
+      jest.spyOn(activitiesService, 'getActivities').mockResolvedValue({
+        activities: [],
+        count: 0
+      });
+
+      const { activities } =
+        await activitiesService.getActivitiesForPortfolioCalculator({
+          userCurrency: 'CHF',
+          userId: userDummyData.id,
+          withCash: true
+        });
+
+      jest.spyOn(currentRateService, 'getValues').mockResolvedValue({
+        dataProviderInfos: [],
+        errors: [],
+        values: []
+      });
+
+      const accountBalanceItems =
+        await accountBalanceService.getAccountBalanceItems({
+          userCurrency: 'CHF',
+          userId: userDummyData.id
+        });
+
+      const portfolioCalculator = portfolioCalculatorFactory.createCalculator({
+        accountBalanceItems,
+        activities,
+        calculationType: PerformanceCalculationType.ROAI,
+        currency: 'CHF',
+        userId: userDummyData.id
+      });
+
+      const portfolioSnapshot = await portfolioCalculator.computeSnapshot();
+
+      const position = portfolioSnapshot.positions.find(({ symbol }) => {
+        return symbol === 'USD';
+      });
+
+      /**
+       * Investment: 2000 USD * 0.91 = 1820 CHF
+       * Investment value with currency effect: (1000 USD * 0.85) + (1000 USD * 0.90) = 1750 CHF
+       * Net performance: (1000 USD * 1.0) - (1000 USD * 1.0) = 0 CHF
+       * Total account balance: 2000 USD * 0.85 = 1700 CHF (using the exchange rate on 2024-12-31)
+       * Value in base currency: 2000 USD * 0.91 = 1820 CHF
+       */
+      expect(position).toMatchObject<TimelinePosition>({
+        activitiesCount: 2,
+        averagePrice: new Big(1),
+        currency: 'USD',
+        dataSource: DataSource.YAHOO,
+        dateOfFirstActivity: '2023-12-31',
+        dividend: new Big(0),
+        dividendInBaseCurrency: new Big(0),
+        fee: new Big(0),
+        feeInBaseCurrency: new Big(0),
+        grossPerformance: new Big(0),
+        grossPerformancePercentage: new Big(0),
+        grossPerformancePercentageWithCurrencyEffect: new Big(
+          '0.08211603004634809014'
+        ),
+        grossPerformanceWithCurrencyEffect: new Big(70),
+        investment: new Big(1820),
+        investmentWithCurrencyEffect: new Big(1750),
+        marketPrice: 1,
+        marketPriceInBaseCurrency: 0.91,
+        netPerformance: new Big(0),
+        netPerformancePercentage: new Big(0),
+        netPerformancePercentageWithCurrencyEffectMap: {
+          '1d': new Big('0.01111111111111111111'),
+          '1y': new Big('0.06937181021989792704'),
+          '5y': new Big('0.0818817546090273363'),
+          max: new Big('0.0818817546090273363'),
+          mtd: new Big('0.01111111111111111111'),
+          wtd: new Big('-0.05517241379310344828'),
+          ytd: new Big('0.01111111111111111111')
+        },
+        netPerformanceWithCurrencyEffectMap: {
+          '1d': new Big(20),
+          '1y': new Big(60),
+          '5y': new Big(70),
+          max: new Big(70),
+          mtd: new Big(20),
+          wtd: new Big(-80),
+          ytd: new Big(20)
+        },
+        quantity: new Big(2000),
+        symbol: 'USD',
+        timeWeightedInvestment: new Big('912.47956403269754768392'),
+        timeWeightedInvestmentWithCurrencyEffect: new Big(
+          '852.45231607629427792916'
+        ),
+        valueInBaseCurrency: new Big(1820)
+      });
+
+      expect(portfolioSnapshot).toMatchObject({
+        currentValueInBaseCurrency: new Big(1820),
+        hasErrors: false,
+        totalCashInBaseCurrency: new Big(1820),
+        totalFeesWithCurrencyEffect: new Big(0),
+        totalInterestWithCurrencyEffect: new Big(0),
+        totalInvestment: new Big(1820),
+        totalLiabilitiesWithCurrencyEffect: new Big(0)
+      });
+
+      /**
+       * Value with currency effect: 2000 USD * 0.91 = 1820 CHF
+       * Net worth: 1820 CHF (the cash is included in the value and therefore
+       * not added on top of it again)
+       * Cash in base currency: 2000 USD * 0.91 = 1820 CHF (the whole portfolio
+       * consists of cash, hence it matches the value)
+       * Net performance with currency effect: 70 CHF / 852.45 CHF ≈ 8.21 %
+       */
+      expect(portfolioSnapshot.historicalData.at(-1)).toEqual({
+        date: '2025-01-01',
+        investmentValueWithCurrencyEffect: 0,
+        netPerformance: 0,
+        netPerformanceInPercentage: 0,
+        netPerformanceInPercentageWithCurrencyEffect: 0.08211603004634808,
+        netPerformanceWithCurrencyEffect: 70,
+        netWorth: 1820,
+        totalCashInBaseCurrency: 1820,
+        totalInvestment: 1820,
+        totalInvestmentValueWithCurrencyEffect: 1750,
+        value: 1820,
+        valueWithCurrencyEffect: 1820
+      });
+    });
+
+    it('should exclude cash in the base currency from the performance calculation', async () => {
+      jest.useFakeTimers().setSystemTime(parseDate('2025-01-01').getTime());
+
+      const accountId = randomUUID();
+
+      jest
+        .spyOn(accountBalanceService, 'getAccountBalances')
+        .mockResolvedValue({
+          balances: [
+            {
+              accountId,
+              date: parseDate('2023-12-31'),
+              id: randomUUID(),
+              value: 1000,
+              valueInBaseCurrency: 1000
+            },
+            {
+              accountId,
+              date: parseDate('2024-12-31'),
+              id: randomUUID(),
+              value: 2000,
+              valueInBaseCurrency: 2000
+            }
+          ]
+        });
+
+      jest.spyOn(accountService, 'getCashDetails').mockResolvedValue({
+        accounts: [
+          {
+            balance: 2000,
+            comment: null,
+            createdAt: parseDate('2023-12-31'),
+            currency: 'CHF',
+            id: accountId,
+            name: 'CHF',
+            platformId: null,
+            updatedAt: parseDate('2023-12-31'),
+            userId: userDummyData.id
+          }
+        ],
+        balanceInBaseCurrency: 2000
+      });
+
+      jest
+        .spyOn(dataProviderService, 'getDataSourceForExchangeRates')
+        .mockReturnValue(DataSource.YAHOO);
+
+      jest.spyOn(activitiesService, 'getActivities').mockResolvedValue({
+        activities: [],
+        count: 0
+      });
+
+      const { activities } =
+        await activitiesService.getActivitiesForPortfolioCalculator({
+          userCurrency: 'CHF',
+          userId: userDummyData.id,
+          withCash: true
+        });
+
+      jest.spyOn(currentRateService, 'getValues').mockResolvedValue({
+        dataProviderInfos: [],
+        errors: [],
+        values: []
+      });
+
+      const accountBalanceItems =
+        await accountBalanceService.getAccountBalanceItems({
+          userCurrency: 'CHF',
+          userId: userDummyData.id
+        });
+
+      const portfolioCalculator = portfolioCalculatorFactory.createCalculator({
+        accountBalanceItems,
+        activities,
+        calculationType: PerformanceCalculationType.ROAI,
+        currency: 'CHF',
+        userId: userDummyData.id
+      });
+
+      const portfolioSnapshot = await portfolioCalculator.computeSnapshot();
+
+      const position = portfolioSnapshot.positions.find(({ symbol }) => {
+        return symbol === 'CHF';
+      });
+
+      /**
+       * The holding itself keeps its investment and value so that it remains
+       * visible in the holdings table
+       */
+      expect(position).toMatchObject<Partial<TimelinePosition>>({
+        currency: 'CHF',
+        grossPerformance: new Big(0),
+        grossPerformanceWithCurrencyEffect: new Big(0),
+        investment: new Big(2000),
+        investmentWithCurrencyEffect: new Big(2000),
+        netPerformance: new Big(0),
+        quantity: new Big(2000),
+        symbol: 'CHF',
+        valueInBaseCurrency: new Big(2000)
+      });
+
+      /**
+       * Total investment: 0 CHF (cash in the base currency cannot generate a
+       * currency effect and would only dilute the performance)
+       * Current value in base currency: 2000 CHF (the cash still counts
+       * towards the net worth)
+       */
+      expect(portfolioSnapshot).toMatchObject({
+        currentValueInBaseCurrency: new Big(2000),
+        hasErrors: false,
+        totalCashInBaseCurrency: new Big(2000),
+        totalFeesWithCurrencyEffect: new Big(0),
+        totalInterestWithCurrencyEffect: new Big(0),
+        totalInvestment: new Big(0),
+        totalLiabilitiesWithCurrencyEffect: new Big(0)
+      });
+
+      /**
+       * Value: 0 CHF (the cash is excluded from the performance calculation
+       * and therefore from the value it is measured against)
+       * Net worth: 2000 CHF (the cash still counts towards the net worth)
+       */
+      expect(portfolioSnapshot.historicalData.at(-1)).toEqual({
+        date: '2025-01-01',
+        investmentValueWithCurrencyEffect: 0,
+        netPerformance: 0,
+        netPerformanceInPercentage: 0,
+        netPerformanceInPercentageWithCurrencyEffect: 0,
+        netPerformanceWithCurrencyEffect: 0,
+        netWorth: 2000,
+        totalCashInBaseCurrency: 2000,
+        totalInvestment: 0,
+        totalInvestmentValueWithCurrencyEffect: 0,
+        value: 0,
+        valueWithCurrencyEffect: 0
+      });
+    });
+
+    it('should add cash in the base currency to the net worth of a portfolio with holdings', async () => {
+      jest.useFakeTimers().setSystemTime(parseDate('2025-01-01').getTime());
+
+      const accountId = randomUUID();
+
+      jest
+        .spyOn(accountBalanceService, 'getAccountBalances')
+        .mockResolvedValue({
+          balances: [
+            {
+              accountId,
+              date: parseDate('2023-12-31'),
+              id: randomUUID(),
+              value: 2000,
+              valueInBaseCurrency: 2000
+            }
+          ]
+        });
+
+      jest.spyOn(accountService, 'getCashDetails').mockResolvedValue({
+        accounts: [
+          {
+            balance: 2000,
+            comment: null,
+            createdAt: parseDate('2023-12-31'),
+            currency: 'CHF',
+            id: accountId,
+            name: 'CHF',
+            platformId: null,
+            updatedAt: parseDate('2023-12-31'),
+            userId: userDummyData.id
+          }
+        ],
+        balanceInBaseCurrency: 2000
+      });
+
+      jest
+        .spyOn(dataProviderService, 'getDataSourceForExchangeRates')
+        .mockReturnValue(DataSource.YAHOO);
+
+      jest.spyOn(activitiesService, 'getActivities').mockResolvedValue({
+        activities: [
+          {
+            ...activityDummyData,
+            assetProfile: {
+              ...assetProfileDummyData,
+              currency: 'CHF',
+              dataSource: 'YAHOO',
+              name: 'Novartis AG',
+              symbol: 'NOVN.SW'
+            },
+            date: parseDate('2023-12-31'),
+            feeInAssetProfileCurrency: 0,
+            feeInBaseCurrency: 0,
+            quantity: 2,
+            type: 'BUY',
+            unitPriceInAssetProfileCurrency: 100
+          }
+        ],
+        count: 1
+      });
+
+      const { activities } =
+        await activitiesService.getActivitiesForPortfolioCalculator({
+          userCurrency: 'CHF',
+          userId: userDummyData.id,
+          withCash: true
+        });
+
+      // The cash symbol has no market data, the holding is quoted at a
+      // constant price so that it does not generate any performance on its own
+      jest
+        .spyOn(currentRateService, 'getValues')
+        .mockImplementation(({ dataGatheringItems, dateQuery }) => {
+          const values = [];
+
+          for (const date of eachDayOfInterval({
+            end: dateQuery.lt,
+            start: dateQuery.gte
+          })) {
+            for (const { dataSource, symbol } of dataGatheringItems) {
+              if (symbol === 'NOVN.SW') {
+                values.push({ date, dataSource, marketPrice: 100, symbol });
+              }
+            }
+          }
+
+          return Promise.resolve({
+            values,
+            dataProviderInfos: [],
+            errors: []
+          });
+        });
+
+      const accountBalanceItems =
+        await accountBalanceService.getAccountBalanceItems({
+          userCurrency: 'CHF',
+          userId: userDummyData.id
+        });
+
+      const portfolioCalculator = portfolioCalculatorFactory.createCalculator({
+        accountBalanceItems,
+        activities,
+        calculationType: PerformanceCalculationType.ROAI,
+        currency: 'CHF',
+        userId: userDummyData.id
+      });
+
+      const portfolioSnapshot = await portfolioCalculator.computeSnapshot();
+
+      /**
+       * Total assets: 2000 CHF cash + 2 * 100 CHF holding = 2200 CHF
+       * Total investment: 200 CHF (only the holding, the cash is excluded)
+       */
+      expect(portfolioSnapshot).toMatchObject({
+        currentValueInBaseCurrency: new Big(2200),
+        hasErrors: false,
+        totalCashInBaseCurrency: new Big(2000),
+        totalInvestment: new Big(200)
+      });
+
+      /**
+       * Value: 200 CHF (the holding only, the cash is excluded from the
+       * performance calculation)
+       * Net worth: 2200 CHF (the value plus the cash, counted exactly once)
+       */
+      expect(portfolioSnapshot.historicalData.at(-1)).toEqual({
+        date: '2025-01-01',
+        investmentValueWithCurrencyEffect: 0,
+        netPerformance: 0,
+        netPerformanceInPercentage: 0,
+        netPerformanceInPercentageWithCurrencyEffect: 0,
+        netPerformanceWithCurrencyEffect: 0,
+        netWorth: 2200,
+        totalCashInBaseCurrency: 2000,
+        totalInvestment: 200,
+        totalInvestmentValueWithCurrencyEffect: 200,
+        value: 200,
+        valueWithCurrencyEffect: 200
+      });
+    });
+  });
+});

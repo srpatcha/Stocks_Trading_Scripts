@@ -1,0 +1,125 @@
+import { ANIMATION_MODULE_TYPE } from '@angular/core';
+import { applicationConfig, moduleMetadata } from '@storybook/angular';
+import type { Meta, StoryObj } from '@storybook/angular';
+import { NgxSkeletonLoaderModule } from 'ngx-skeleton-loader';
+
+import { GfValueComponent } from './value.component';
+
+export default {
+  title: 'Value',
+  component: GfValueComponent,
+  decorators: [
+    applicationConfig({
+      providers: [
+        {
+          provide: ANIMATION_MODULE_TYPE,
+          useValue: 'NoopAnimations'
+        }
+      ]
+    }),
+    moduleMetadata({
+      imports: [NgxSkeletonLoaderModule]
+    })
+  ],
+  argTypes: {
+    deviceType: {
+      control: 'select',
+      options: ['desktop', 'mobile']
+    },
+    enableCopyToClipboardButton: {
+      control: 'boolean'
+    },
+    isLoading: {
+      control: 'boolean'
+    },
+    size: {
+      control: 'select',
+      options: ['small', 'medium', 'large']
+    }
+  }
+} as Meta<GfValueComponent>;
+
+type Story = StoryObj<GfValueComponent>;
+
+export const Loading: Story = {
+  args: {
+    isLoading: true
+  }
+};
+
+export const Currency: Story = {
+  args: {
+    isCurrency: true,
+    locale: 'en-US',
+    unit: 'USD',
+    value: 7
+  }
+};
+
+export const DateValue: Story = {
+  args: {
+    deviceType: 'desktop',
+    isDate: true,
+    locale: 'en-US',
+    value: new Date().toISOString()
+  },
+  name: 'Date'
+};
+
+export const Label: Story = {
+  args: {
+    locale: 'en-US',
+    value: 7.25
+  },
+  render: (args) => ({
+    props: args,
+    template: `<gf-value [enableCopyToClipboardButton]="enableCopyToClipboardButton" [locale]="locale" [size]="size" [value]="value">Label</gf-value>`
+  })
+};
+
+export const PerformancePositive: Story = {
+  args: {
+    colorizeSign: true,
+    isPercent: true,
+    locale: 'en-US',
+    value: 0.0136810853673890378
+  },
+  name: 'Performance (positive)'
+};
+
+export const PerformanceNegative: Story = {
+  args: {
+    colorizeSign: true,
+    isPercent: true,
+    locale: 'en-US',
+    value: -0.0136810853673890378
+  },
+  name: 'Performance (negative)'
+};
+
+export const PerformanceCloseToZero: Story = {
+  args: {
+    colorizeSign: true,
+    isPercent: true,
+    locale: 'en-US',
+    value: -2.388915360475e-8
+  },
+  name: 'Performance (negative zero)'
+};
+
+export const Precision: Story = {
+  args: {
+    locale: 'en-US',
+    precision: 3,
+    value: 7.2534802394809285309
+  }
+};
+
+export const WithCopyButton: Story = {
+  args: {
+    enableCopyToClipboardButton: true,
+    locale: 'en-US',
+    value: 1234.56
+  },
+  name: 'With Copy Button'
+};

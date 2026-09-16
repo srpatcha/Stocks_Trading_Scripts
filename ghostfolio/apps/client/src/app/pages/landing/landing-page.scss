@@ -1,0 +1,80 @@
+:host {
+  display: block;
+
+  .button-container {
+    .mat-mdc-outlined-button {
+      background-color: var(--light-background);
+    }
+  }
+
+  .customer-map-container {
+    aspect-ratio: 16 / 9;
+  }
+
+  .intro {
+    font-size: 4vw;
+    line-height: 1;
+
+    @media (max-width: 575.98px) {
+      font-size: 10vw;
+    }
+  }
+
+  .logo {
+    height: 3rem;
+    width: 7.5rem;
+
+    &.mask {
+      background-color: rgba(var(--dark-secondary-text));
+      mask-position: center;
+      mask-repeat: no-repeat;
+      mask-size: contain;
+    }
+
+    &.logo-agplv3 {
+      mask-image: url('/assets/images/logo-AGPLv3.svg');
+    }
+  }
+
+  .outro-inner-container {
+    aspect-ratio: 16 / 9;
+    max-height: 66vh;
+
+    div {
+      background-image: url('/assets/intro.jpg');
+      background-position: top left;
+      background-repeat: no-repeat;
+      background-size: contain;
+    }
+  }
+
+  .video {
+    border: 1px solid rgba(var(--dark-dividers));
+
+    &:hover {
+      border-color: rgba(var(--palette-primary-500), 1);
+    }
+  }
+}
+
+:host-context(.theme-dark) {
+  .button-container {
+    .mat-mdc-outlined-button {
+      background-color: var(--dark-background);
+    }
+  }
+
+  .logo {
+    &.logo-agplv3 {
+      background-color: rgba(var(--light-primary-text));
+    }
+  }
+
+  .outro-inner-container {
+    display: none;
+  }
+
+  .video {
+    border-color: rgba(var(--light-dividers));
+  }
+}

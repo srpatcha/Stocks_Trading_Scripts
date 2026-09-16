@@ -1,0 +1,753 @@
+import { getCountryCodeByName } from '@ghostfolio/api/helper/country.helper';
+import { ConfigurationService } from '@ghostfolio/api/services/configuration/configuration.service';
+import { CryptocurrencyService } from '@ghostfolio/api/services/cryptocurrency/cryptocurrency.service';
+import { AssetProfileDelistedError } from '@ghostfolio/api/services/data-provider/errors/asset-profile-delisted.error';
+import {
+  DataProviderInterface,
+  GetAssetProfileParams,
+  GetDividendsParams,
+  GetHistoricalParams,
+  GetQuotesParams,
+  GetSearchParams
+} from '@ghostfolio/api/services/data-provider/interfaces/data-provider.interface';
+import { FetchService } from '@ghostfolio/api/services/fetch/fetch.service';
+import { PrismaService } from '@ghostfolio/api/services/prisma/prisma.service';
+import {
+  DEFAULT_CURRENCY,
+  REPLACE_NAME_PARTS
+} from '@ghostfolio/common/config';
+import {
+  DATE_FORMAT,
+  isCurrencySymbol,
+  parseDate
+} from '@ghostfolio/common/helper';
+import {
+  DataProviderHistoricalResponse,
+  DataProviderInfo,
+  DataProviderResponse,
+  LookupItem,
+  LookupResponse
+} from '@ghostfolio/common/interfaces';
+import { MarketState } from '@ghostfolio/common/types';
+
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  AssetClass,
+  AssetSubClass,
+  DataSource,
+  SymbolProfile
+} from '@prisma/client';
+import { isISIN } from 'class-validator';
+import {
+  addDays,
+  addYears,
+  format,
+  isAfter,
+  isBefore,
+  isSameDay,
+  parseISO
+} from 'date-fns';
+import { isArray, uniqBy } from 'lodash';
+
+@Injectable()
+export class FinancialModelingPrepService
+  implements DataProviderInterface, OnModuleInit
+{
+  private static countriesMapping = {
+    'Congo (Dem. Rep. of the)': 'CD',
+    'Congo (Rep. of)': 'CG',
+    'Czech Republic': 'CZ',
+    'Korea (the Republic of)': 'KR',
+    Macau: 'MO',
+    'Russian Federation': 'RU',
+    'Taiwan (Province of China)': 'TW',
+    Turkey: 'TR',
+    'Virgin Islands (British)': 'VG'
+  };
+
+  private readonly logger = new Logger(FinancialModelingPrepService.name);
+
+  private apiKey: string;
+
+  public constructor(
+    private readonly configurationService: ConfigurationService,
+    private readonly cryptocurrencyService: CryptocurrencyService,
+    private readonly fetchService: FetchService,
+    private readonly prismaService: PrismaService
+  ) {}
+
+  public onModuleInit() {
+    this.apiKey = this.configurationService.get(
+      'API_KEY_FINANCIAL_MODELING_PREP'
+    );
+  }
+
+  public canHandle() {
+    return true;
+  }
+
+  public async getAssetProfile({
+    requestTimeout = this.configurationService.get('REQUEST_TIMEOUT'),
+    symbol
+  }: GetAssetProfileParams): Promise<Partial<SymbolProfile>> {
+    let response: Partial<SymbolProfile> = {
+      symbol,
+      dataSource: this.getName()
+    };
+
+    try {
+      if (isCurrencySymbol(symbol)) {
+        response.assetClass = AssetClass.LIQUIDITY;
+        response.assetSubClass = AssetSubClass.CASH;
+        response.currency = symbol.substring(
+          symbol.length - DEFAULT_CURRENCY.length
+        );
+      } else if (this.cryptocurrencyService.isCryptocurrency(symbol)) {
+        const queryParams = new URLSearchParams({
+          symbol,
+          apikey: this.apiKey
+        });
+
+        const [quote] = await this.fetchService
+          .fetch(
+            `${this.getUrl({ version: 'stable' })}/quote?${queryParams.toString()}`,
+            {
+              signal: AbortSignal.timeout(requestTimeout)
+            }
+          )
+          .then((res) => res.json());
+
+        if (!quote) {
+          throw new AssetProfileDelistedError(
+            `No data found, ${symbol} (${this.getName()}) may be delisted`
+          );
+        }
+
+        response.assetClass = AssetClass.LIQUIDITY;
+        response.assetSubClass = AssetSubClass.CRYPTOCURRENCY;
+        response.currency = symbol.substring(
+          symbol.length - DEFAULT_CURRENCY.length
+        );
+        response.name = quote.name;
+      } else {
+        const queryParams = new URLSearchParams({
+          symbol,
+          apikey: this.apiKey
+        });
+
+        const [assetProfile] = await this.fetchService
+          .fetch(
+            `${this.getUrl({ version: 'stable' })}/profile?${queryParams.toString()}`,
+            {
+              signal: AbortSignal.timeout(requestTimeout)
+            }
+          )
+          .then((res) => res.json());
+
+        if (!assetProfile) {
+          const indexProfile = await this.getIndexProfile({
+            requestTimeout,
+            symbol
+          });
+
+          if (!indexProfile) {
+            throw new AssetProfileDelistedError(
+              `No data found, ${symbol} (${this.getName()}) may be delisted`
+            );
+          }
+
+          return { ...response, ...indexProfile };
+        }
+
+        const { assetClass, assetSubClass } =
+          this.parseAssetClass(assetProfile);
+
+        response.assetClass = assetClass;
+        response.assetSubClass = assetSubClass;
+
+        if (
+          assetSubClass === AssetSubClass.ETF ||
+          assetSubClass === AssetSubClass.MUTUALFUND
+        ) {
+          const queryParams = new URLSearchParams({
+            symbol,
+            apikey: this.apiKey
+          });
+
+          const etfCountryWeightings = await this.fetchService
+            .fetch(
+              `${this.getUrl({ version: 'stable' })}/etf/country-weightings?${queryParams.toString()}`,
+              {
+                signal: AbortSignal.timeout(requestTimeout)
+              }
+            )
+            .then((res) => res.json());
+
+          response.countries = etfCountryWeightings
+            .map(({ country: countryName, weightPercentage }) => {
+              return {
+                code: getCountryCodeByName({
+                  aliases: FinancialModelingPrepService.countriesMapping,
+                  dataSource: this.getName(),
+                  name: countryName
+                }),
+                weight: parseFloat(`${weightPercentage}`) / 100
+              };
+            })
+            .filter(({ code }) => {
+              return !!code;
+            });
+
+          const etfHoldings = await this.fetchService
+            .fetch(
+              `${this.getUrl({ version: 'stable' })}/etf/holdings?${queryParams.toString()}`,
+              {
+                signal: AbortSignal.timeout(requestTimeout)
+              }
+            )
+            .then((res) => res.json());
+
+          const sortedTopHoldings = etfHoldings
+            .sort((a, b) => {
+              return b.weightPercentage - a.weightPercentage;
+            })
+            .slice(0, 10);
+
+          response.holdings = sortedTopHoldings.map(
+            ({ name, weightPercentage }) => {
+              return { name, weight: weightPercentage / 100 };
+            }
+          );
+
+          const [etfInformation] = await this.fetchService
+            .fetch(
+              `${this.getUrl({ version: 'stable' })}/etf/info?${queryParams.toString()}`,
+              {
+                signal: AbortSignal.timeout(requestTimeout)
+              }
+            )
+            .then((res) => res.json());
+
+          if (etfInformation?.website) {
+            response.url = etfInformation.website;
+          }
+
+          const etfSectorWeightings = await this.fetchService
+            .fetch(
+              `${this.getUrl({ version: 'stable' })}/etf/sector-weightings?${queryParams.toString()}`,
+              {
+                signal: AbortSignal.timeout(requestTimeout)
+              }
+            )
+            .then((res) => res.json());
+
+          response.sectors = etfSectorWeightings.map(
+            ({ sector, weightPercentage }) => {
+              return {
+                name: sector,
+                weight: weightPercentage / 100
+              };
+            }
+          );
+        } else if (assetSubClass === AssetSubClass.STOCK) {
+          if (assetProfile.country) {
+            response.countries = [{ code: assetProfile.country, weight: 1 }];
+          }
+
+          if (assetProfile.sector) {
+            response.sectors = [{ name: assetProfile.sector, weight: 1 }];
+          }
+        }
+
+        response.currency = assetProfile.currency;
+
+        if (assetProfile.isin) {
+          response.isin = assetProfile.isin;
+        }
+
+        response.name = this.formatName({ name: assetProfile.companyName });
+
+        if (assetProfile.website) {
+          response.url = assetProfile.website;
+        }
+      }
+    } catch (error) {
+      let message = error;
+      response = undefined;
+
+      if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+        message = `RequestError: The operation to get the asset profile for ${symbol} was aborted because the request to the data provider took more than ${(
+          requestTimeout / 1000
+        ).toFixed(3)} seconds`;
+      }
+
+      if (error instanceof AssetProfileDelistedError) {
+        this.logger.warn(error.message);
+      } else {
+        this.logger.error(message);
+      }
+    }
+
+    return response;
+  }
+
+  public getDataProviderInfo(): DataProviderInfo {
+    return {
+      dataSource: this.getName(),
+      isPremium: true,
+      name: 'Financial Modeling Prep',
+      url: 'https://financialmodelingprep.com/developer/docs'
+    };
+  }
+
+  public async getDividends({
+    from,
+    requestTimeout = this.configurationService.get('REQUEST_TIMEOUT'),
+    symbol,
+    to
+  }: GetDividendsParams) {
+    if (isSameDay(from, to)) {
+      to = addDays(to, 1);
+    }
+
+    try {
+      const queryParams = new URLSearchParams({
+        symbol,
+        apikey: this.apiKey
+      });
+
+      const response: {
+        [date: string]: DataProviderHistoricalResponse;
+      } = {};
+
+      const dividends = await this.fetchService
+        .fetch(
+          `${this.getUrl({ version: 'stable' })}/dividends?${queryParams.toString()}`,
+          {
+            signal: AbortSignal.timeout(requestTimeout)
+          }
+        )
+        .then((res) => res.json());
+
+      dividends
+        .filter(({ date }) => {
+          return (
+            (isSameDay(parseISO(date), from) ||
+              isAfter(parseISO(date), from)) &&
+            isBefore(parseISO(date), to)
+          );
+        })
+        .forEach(({ adjDividend, date }) => {
+          response[date] = {
+            marketPrice: adjDividend
+          };
+        });
+
+      return response;
+    } catch (error) {
+      this.logger.error(
+        `Could not get dividends for ${symbol} (${this.getName()}) from ${format(
+          from,
+          DATE_FORMAT
+        )} to ${format(to, DATE_FORMAT)}: [${error.name}] ${error.message}`
+      );
+
+      return {};
+    }
+  }
+
+  public async getHistorical({
+    from,
+    requestTimeout = this.configurationService.get('REQUEST_TIMEOUT'),
+    symbol,
+    to
+  }: GetHistoricalParams): Promise<{
+    [date: string]: DataProviderHistoricalResponse;
+  }> {
+    const MAX_YEARS_PER_REQUEST = 5;
+    const result: {
+      [date: string]: DataProviderHistoricalResponse;
+    } = {};
+
+    let currentFrom = from;
+
+    try {
+      while (isBefore(currentFrom, to) || isSameDay(currentFrom, to)) {
+        const currentTo = isBefore(
+          addYears(currentFrom, MAX_YEARS_PER_REQUEST),
+          to
+        )
+          ? addYears(currentFrom, MAX_YEARS_PER_REQUEST)
+          : to;
+
+        const queryParams = new URLSearchParams({
+          symbol,
+          apikey: this.apiKey,
+          from: format(currentFrom, DATE_FORMAT),
+          to: format(currentTo, DATE_FORMAT)
+        });
+
+        const historical = await this.fetchService
+          .fetch(
+            `${this.getUrl({ version: 'stable' })}/historical-price-eod/full?${queryParams.toString()}`,
+            {
+              signal: AbortSignal.timeout(requestTimeout)
+            }
+          )
+          .then((res) => res.json());
+
+        for (const { close, date } of historical) {
+          if (
+            (isSameDay(parseDate(date), currentFrom) ||
+              isAfter(parseDate(date), currentFrom)) &&
+            isBefore(parseDate(date), currentTo)
+          ) {
+            result[date] = {
+              marketPrice: close
+            };
+          }
+        }
+
+        currentFrom = addYears(currentFrom, MAX_YEARS_PER_REQUEST);
+      }
+
+      return result;
+    } catch (error) {
+      throw new Error(
+        `Could not get historical market data for ${symbol} (${this.getName()}) from ${format(
+          from,
+          DATE_FORMAT
+        )} to ${format(to, DATE_FORMAT)}: [${error.name}] ${error.message}`
+      );
+    }
+  }
+
+  public getMaxNumberOfSymbolsPerRequest() {
+    return 20;
+  }
+
+  public getName(): DataSource {
+    return DataSource.FINANCIAL_MODELING_PREP;
+  }
+
+  public async getQuotes({
+    requestTimeout = this.configurationService.get('REQUEST_TIMEOUT'),
+    symbols
+  }: GetQuotesParams): Promise<{ [symbol: string]: DataProviderResponse }> {
+    const response: { [symbol: string]: DataProviderResponse } = {};
+
+    if (symbols.length <= 0) {
+      return response;
+    }
+
+    try {
+      const currencyBySymbolMap: {
+        [symbol: string]: Pick<SymbolProfile, 'currency'>;
+      } = {};
+
+      const queryParams = new URLSearchParams({
+        symbols: symbols.join(','),
+        apikey: this.apiKey
+      });
+
+      const [assetProfileResolutions, quotes] = await Promise.all([
+        this.prismaService.assetProfileResolution.findMany({
+          where: {
+            dataSourceTarget: this.getDataProviderInfo().dataSource,
+            symbolTarget: { in: symbols }
+          }
+        }),
+        this.fetchService
+          .fetch(
+            `${this.getUrl({ version: 'stable' })}/batch-quote-short?${queryParams.toString()}`,
+            {
+              signal: AbortSignal.timeout(requestTimeout)
+            }
+          )
+          .then(async (res) => {
+            const json = (await res.json()) as unknown as {
+              price: number;
+              symbol: string;
+            }[];
+
+            return isArray(json) ? json : [];
+          })
+      ]);
+
+      for (const { currency, symbolTarget } of assetProfileResolutions) {
+        currencyBySymbolMap[symbolTarget] = { currency };
+      }
+
+      const resolvedSymbols = assetProfileResolutions.map(
+        ({ symbolTarget }) => {
+          return symbolTarget;
+        }
+      );
+
+      const symbolsToFetch = quotes
+        .map(({ symbol }) => {
+          return symbol;
+        })
+        .filter((symbol) => {
+          return !resolvedSymbols.includes(symbol);
+        });
+
+      if (symbolsToFetch.length > 0) {
+        await Promise.all(
+          symbolsToFetch.map(async (symbol) => {
+            const assetProfile = await this.getAssetProfile({
+              requestTimeout,
+              symbol
+            });
+
+            if (assetProfile?.currency) {
+              currencyBySymbolMap[symbol] = {
+                currency: assetProfile.currency
+              };
+            } else if (this.cryptocurrencyService.isCryptocurrency(symbol)) {
+              currencyBySymbolMap[symbol] = { currency: DEFAULT_CURRENCY };
+            }
+          })
+        );
+      }
+
+      for (const { price, symbol } of quotes) {
+        let marketState: MarketState = 'delayed';
+
+        if (isCurrencySymbol(symbol)) {
+          marketState = 'open';
+        }
+
+        response[symbol] = {
+          marketState,
+          currency: currencyBySymbolMap[symbol]?.currency,
+          dataProviderInfo: this.getDataProviderInfo(),
+          dataSource: this.getDataProviderInfo().dataSource,
+          marketPrice: price
+        };
+      }
+    } catch (error) {
+      let message = error;
+
+      if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+        message = `RequestError: The operation to get the quotes for ${symbols.join(
+          ', '
+        )} was aborted because the request to the data provider took more than ${(
+          requestTimeout / 1000
+        ).toFixed(3)} seconds`;
+      }
+
+      this.logger.error(message);
+    }
+
+    return response;
+  }
+
+  public getTestSymbol() {
+    return 'AAPL';
+  }
+
+  public async search({
+    includeIndices = false,
+    query,
+    requestTimeout = this.configurationService.get('REQUEST_TIMEOUT')
+  }: GetSearchParams): Promise<LookupResponse> {
+    const assetProfileBySymbolMap: {
+      [symbol: string]: Partial<SymbolProfile>;
+    } = {};
+
+    let items: LookupItem[] = [];
+
+    try {
+      if (isISIN(query?.toUpperCase())) {
+        const queryParams = new URLSearchParams({
+          apikey: this.apiKey,
+          isin: query.toUpperCase()
+        });
+
+        const result = await this.fetchService
+          .fetch(
+            `${this.getUrl({ version: 'stable' })}/search-isin?${queryParams.toString()}`,
+            {
+              signal: AbortSignal.timeout(requestTimeout)
+            }
+          )
+          .then((res) => res.json());
+
+        await Promise.all(
+          result.map(({ symbol }) => {
+            return this.getAssetProfile({ symbol }).then((assetProfile) => {
+              assetProfileBySymbolMap[symbol] = assetProfile;
+            });
+          })
+        );
+
+        items = result.map(({ assetClass, assetSubClass, name, symbol }) => {
+          return {
+            assetClass,
+            assetSubClass,
+            symbol,
+            currency: assetProfileBySymbolMap[symbol]?.currency,
+            dataProviderInfo: this.getDataProviderInfo(),
+            dataSource: this.getName(),
+            name: this.formatName({ name })
+          };
+        });
+      } else {
+        const [nameResults, symbolResults] = await Promise.all([
+          this.getSearchResults({
+            query,
+            requestTimeout,
+            endpoint: 'search-name'
+          }),
+          this.getSearchResults({
+            query,
+            requestTimeout,
+            endpoint: 'search-symbol'
+          })
+        ]);
+
+        const result = uniqBy(
+          [...nameResults, ...symbolResults],
+          ({ exchange, symbol }) => {
+            return `${exchange}-${symbol}`;
+          }
+        );
+
+        items = result
+          .filter(({ exchange, symbol }) => {
+            const isIndex = exchange === 'INDEX' || symbol.startsWith('^');
+
+            if (exchange === 'FOREX' || (includeIndices === false && isIndex)) {
+              return false;
+            }
+
+            return true;
+          })
+          .map(({ currency, name, symbol }) => {
+            return {
+              currency,
+              symbol,
+              assetClass: undefined, // TODO
+              assetSubClass: undefined, // TODO
+              dataProviderInfo: this.getDataProviderInfo(),
+              dataSource: this.getName(),
+              name: this.formatName({ name })
+            };
+          });
+      }
+    } catch (error) {
+      let message = error;
+
+      if (['AbortError', 'TimeoutError'].includes(error?.name)) {
+        message = `RequestError: The operation to search for ${query} was aborted because the request to the data provider took more than ${(
+          this.configurationService.get('REQUEST_TIMEOUT') / 1000
+        ).toFixed(3)} seconds`;
+      }
+
+      this.logger.error(message);
+    }
+
+    return { items };
+  }
+
+  private formatName({ name }: { name: string }) {
+    if (name) {
+      for (const part of REPLACE_NAME_PARTS) {
+        name = name.replace(part, '');
+      }
+
+      name = name.trim();
+    }
+
+    return name;
+  }
+
+  /**
+   * Financial Modeling Prep has no profile for an index, thus the currency and
+   * the name are taken from the search endpoint.
+   */
+  private async getIndexProfile({
+    requestTimeout,
+    symbol
+  }: {
+    requestTimeout: number;
+    symbol: string;
+  }): Promise<Pick<SymbolProfile, 'currency' | 'name'>> {
+    const results = await this.getSearchResults({
+      requestTimeout,
+      endpoint: 'search-symbol',
+      query: symbol
+    });
+
+    const index = results?.find(({ exchange, symbol: symbolOfResult }) => {
+      return exchange === 'INDEX' && symbolOfResult === symbol;
+    });
+
+    if (!index) {
+      return undefined;
+    }
+
+    return {
+      currency: index.currency,
+      name: this.formatName({ name: index.name })
+    };
+  }
+
+  private async getSearchResults({
+    endpoint,
+    query,
+    requestTimeout
+  }: {
+    endpoint: 'search-name' | 'search-symbol';
+    query: string;
+    requestTimeout: number;
+  }) {
+    const queryParams = new URLSearchParams({
+      query,
+      apikey: this.apiKey
+    });
+
+    return this.fetchService
+      .fetch(
+        `${this.getUrl({ version: 'stable' })}/${endpoint}?${queryParams.toString()}`,
+        {
+          signal: AbortSignal.timeout(requestTimeout)
+        }
+      )
+      .then((res) => res.json());
+  }
+
+  private getUrl({ version }: { version: number | 'stable' }) {
+    const baseUrl = 'https://financialmodelingprep.com';
+
+    if (version === 'stable') {
+      return `${baseUrl}/stable`;
+    }
+
+    return `${baseUrl}/api/v${version}`;
+  }
+
+  private parseAssetClass(profile: any): {
+    assetClass: AssetClass | undefined;
+    assetSubClass: AssetSubClass | undefined;
+  } {
+    let assetClass: AssetClass | undefined;
+    let assetSubClass: AssetSubClass | undefined;
+
+    if (profile) {
+      if (profile.isEtf) {
+        assetClass = AssetClass.EQUITY;
+        assetSubClass = AssetSubClass.ETF;
+      } else if (profile.isFund) {
+        assetClass = AssetClass.EQUITY;
+        assetSubClass = AssetSubClass.MUTUALFUND;
+      } else {
+        assetClass = AssetClass.EQUITY;
+        assetSubClass = AssetSubClass.STOCK;
+      }
+    }
+
+    return { assetClass, assetSubClass };
+  }
+}
