@@ -162,6 +162,9 @@ class TestFeatureImportance:
         if not _HAS_LIGHTGBM:
             pytest.skip("lightgbm not installed")
         from shared.ml.regime_classifier import MLRegimeClassifier
+        # The classifier was never constructed — this raised NameError rather
+        # than exercising the unfitted-model guard it claims to test.
+        clf = MLRegimeClassifier()
         with pytest.raises(RuntimeError, match="not fitted"):
             clf.get_feature_importance()
 

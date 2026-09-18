@@ -15,6 +15,38 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
+@pytest.fixture(autouse=True)
+def neutral_strategy_enricher(request, monkeypatch):
+    """Keep StrategyEnricher offline and neutral for the whole suite.
+
+    Strategies enable the enricher by default, and it fetches news,
+    fundamentals and earnings from Yahoo Finance. Tests use synthetic tickers
+    like "TEST", so in any environment where yfinance is installed the fetch
+    404s, ``should_block_entry`` gates the entry, and a strategy that should
+    emit BUY emits HOLD instead. That made roughly 25 strategy tests fail on
+    CI while passing locally purely because yfinance was absent — and it meant
+    unit tests were making live network calls on every run.
+
+    A default EnrichedData has every ``*_available`` flag False, so
+    ``should_block_entry`` returns (False, "OK") and no confidence boost is
+    applied: the strategy's own conditional logic is what gets exercised,
+    which is what these tests are for.
+
+    Opt out with ``@pytest.mark.live_enricher`` to test the enricher itself.
+    """
+    if request.node.get_closest_marker("live_enricher"):
+        return
+    try:
+        from shared import strategy_enricher
+    except ImportError:  # pragma: no cover - enricher is optional
+        return
+    monkeypatch.setattr(
+        strategy_enricher.StrategyEnricher,
+        "enrich",
+        lambda self, symbol, df: strategy_enricher.EnrichedData(),
+    )
+
+
 @pytest.fixture
 def synthetic_ohlcv_df() -> pd.DataFrame:
     """400-bar synthetic OHLCV DataFrame for single-symbol strategy tests."""

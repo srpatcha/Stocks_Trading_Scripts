@@ -5,7 +5,15 @@
 -r requirements-core.txt
 
 # Optional: ML/AI regime classification
+#
+# scikit-learn is NOT optional alongside lightgbm. regime_classifier.py and
+# feature_engineer.py use lgb.LGBMClassifier / lgb.LGBMRegressor, which live in
+# lightgbm.sklearn and raise
+#   LightGBMError: scikit-learn is required for lightgbm.sklearn
+# without it. It was never declared, so installing lightgbm alone — which is
+# exactly what CI did — left every regime-classifier path broken at runtime.
 lightgbm>=4.0
+scikit-learn>=1.3
 joblib>=1.3
 
 # Optional: Strategy optimization

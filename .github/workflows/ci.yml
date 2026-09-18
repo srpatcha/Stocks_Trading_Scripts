@@ -42,7 +42,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-core.txt
-          pip install lightgbm joblib networkx
+          # scikit-learn is required by lightgbm.sklearn, which
+          # regime_classifier.py and feature_engineer.py both use.
+          pip install lightgbm scikit-learn joblib networkx
           pip install vaderSentiment || true
           pip install yfinance feedparser || true
 
@@ -202,7 +204,7 @@ jobs:
           pip install pandas numpy
           pip install vaderSentiment || true
           pip install yfinance feedparser || true
-          pip install lightgbm joblib || true
+          pip install lightgbm scikit-learn joblib || true
 
       - name: Verify all 15 strategies register
         env:

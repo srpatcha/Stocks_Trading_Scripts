@@ -260,7 +260,12 @@ class TransformerPredictor:
             logger.warning(
                 "Unpickling legacy checkpoint %s — this executes code from the file", path,
             )
-            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+            # nosec B614 - reached only when the caller passes
+            # allow_unsafe_legacy=True, having been told in the error message
+            # above that this unpickles and therefore executes the file.
+            checkpoint = torch.load(  # nosec B614
+                path, map_location=self.device, weights_only=False,
+            )
 
         config = checkpoint["config"]
         self.config = TransformerConfig(**config) if isinstance(config, dict) else config

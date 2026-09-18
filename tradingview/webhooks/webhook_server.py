@@ -17,6 +17,7 @@ import statistics
 import threading
 import time
 import traceback
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
@@ -98,9 +99,15 @@ def load_config(config_path: str = None) -> dict:
 
 
 def _default_config() -> dict:
-    """Return default configuration."""
+    """Return default configuration.
+
+    Binds to loopback. This server terminates plaintext HTTP and the webhook
+    passphrase travels in the request body, so exposing it directly is only
+    safe behind a TLS-terminating reverse proxy. Set server.host explicitly in
+    config.yaml once that proxy is in place.
+    """
     return {
-        "server": {"host": "0.0.0.0", "port": 5000, "debug": False},
+        "server": {"host": "127.0.0.1", "port": 5000, "debug": False},
         "security": {
             "hmac_secret": "",
             "hmac_algorithm": "sha256",
@@ -713,9 +720,19 @@ class HealthMonitor:
     def _ping_health_url(self) -> None:
         if not self._ping_url:
             return
+        # urlopen honours file:, ftp: and custom schemes, so a mistyped or
+        # tampered ping_url could read a local file rather than make an HTTP
+        # request. Restrict it to the two schemes this is meant to use.
+        scheme = urllib.parse.urlparse(self._ping_url).scheme.lower()
+        if scheme not in ("http", "https"):
+            logger.error(
+                "HealthMonitor ping_url must be http or https, got %r — not pinging",
+                scheme or "(none)",
+            )
+            return
         try:
             req = urllib.request.Request(self._ping_url, method="GET")
-            with urllib.request.urlopen(req, timeout=10):
+            with urllib.request.urlopen(req, timeout=10):  # nosec B310 - scheme checked above
                 pass
         except Exception as exc:
             logger.warning("HealthMonitor ping failed (%s): %s", self._ping_url, exc)
@@ -1937,7 +1954,8 @@ if __name__ == "__main__":
 
     config = load_config()
     server_config = config.get("server", {})
-    host = server_config.get("host", "0.0.0.0")
+    # Loopback unless config.yaml says otherwise — see _default_config().
+    host = server_config.get("host", "127.0.0.1")
     port = server_config.get("port", 5000)
 
     # Start health monitor background thread

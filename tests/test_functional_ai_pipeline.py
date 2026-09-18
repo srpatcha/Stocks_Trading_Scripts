@@ -144,13 +144,31 @@ class TestRegimeClassifierPipeline:
 
     # --- test_compute_features_all_present ---
     def test_compute_features_all_present(self):
-        """compute_features should produce ≥30 feature columns."""
+        """compute_features must produce exactly its documented feature set.
+
+        This asserted ">= 30" against a docstring that claimed "30+ features";
+        the implementation has only ever produced 26, so the test failed
+        whenever lightgbm was installed. Pinning the exact set is a stronger
+        check than a round number: it catches a feature being dropped or
+        renamed, which silently changes what every model is trained on.
+        """
         from shared.ml.regime_classifier import MLRegimeClassifier
+
+        expected = {
+            "adx", "atr_pct_rank", "bb_pct_b", "bb_width_z", "ema_slope",
+            "gk_vol", "log_ret_1d", "macd_hist", "obv_slope", "parkinson_vol",
+            "price_vs_sma20", "price_vs_sma50", "price_vs_sma200",
+            "rel_volume", "ret_1d", "ret_5d", "ret_10d", "ret_20d",
+            "roc_10", "roc_20", "rsi_14", "stoch_k",
+            "vol_5d", "vol_10d", "vol_20d", "vol_change_rate",
+        }
 
         df = _make_ohlcv(n=300)
         features = MLRegimeClassifier.compute_features(df)
-        assert len(features.columns) >= 30, (
-            f"Expected ≥30 features, got {len(features.columns)}: {list(features.columns)}"
+
+        assert set(features.columns) == expected, (
+            f"feature set changed: missing {expected - set(features.columns)}, "
+            f"unexpected {set(features.columns) - expected}"
         )
 
     # --- test_compute_features_no_nan ---

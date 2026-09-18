@@ -97,7 +97,13 @@ class MLRegimeClassifier:
 
     @staticmethod
     def compute_features(df: pd.DataFrame) -> pd.DataFrame:
-        """Compute 30+ features from OHLCV data.
+        """Compute the 26-feature set from OHLCV data.
+
+        The count is asserted exactly in
+        ``tests/test_functional_ai_pipeline.py::test_compute_features_all_present``.
+        Update that test alongside any change here — every model in the repo is
+        trained on this set, so adding or removing a column changes their
+        inputs.
 
         Args:
             df: DataFrame with columns: open, high, low, close, volume.

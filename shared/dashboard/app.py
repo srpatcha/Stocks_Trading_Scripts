@@ -407,7 +407,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Launch Graph Memory Dashboard")
     parser.add_argument("--graph-path", default="graph_memory.json", help="Path to graph_memory.json")
     parser.add_argument("--port", type=int, default=8050, help="Server port")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
+    # Loopback by default: the dashboard has no authentication. Pass
+    # --host 0.0.0.0 deliberately, and only on a trusted network.
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address")
     args = parser.parse_args()
 
     configure(args.graph_path)
