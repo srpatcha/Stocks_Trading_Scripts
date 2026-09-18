@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -275,26 +275,73 @@ class LSTMPredictor:
         engine.load_data({symbol: test_df})
         return engine.run(strategy_fn)
 
+    #: Bumped when the on-disk checkpoint layout changes. Version 2 stores only
+    #: primitives and tensors so the file can be read with weights_only=True.
+    CHECKPOINT_FORMAT = 2
+
     def save_model(self, path: str) -> None:
-        """Save model weights and config."""
+        """Save model weights and config.
+
+        The config dataclass and the pandas scaler Series are written as plain
+        dicts rather than pickled objects. A checkpoint containing arbitrary
+        Python objects can only be read by unpickling it, and unpickling
+        executes code — see ``load_model``.
+        """
         if self.model is None:
             raise RuntimeError("No model to save")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         torch.save({
+            "format_version": self.CHECKPOINT_FORMAT,
             "model_state": self.model.state_dict(),
-            "config": self.config,
-            "feature_cols": self.feature_cols,
-            "scaler_mean": self._scaler_mean,
-            "scaler_std": self._scaler_std,
+            "config": asdict(self.config),
+            "feature_cols": list(self.feature_cols),
+            # float()/str() coercion matters: dict(Series) keeps numpy
+            # scalars, which are still pickled globals and would defeat
+            # weights_only=True on read.
+            "scaler_mean": {str(k): float(v) for k, v in self._scaler_mean.items()},
+            "scaler_std": {str(k): float(v) for k, v in self._scaler_std.items()},
         }, path)
 
-    def load_model(self, path: str) -> None:
-        """Load model weights and config."""
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        self.config = checkpoint["config"]
-        self.feature_cols = checkpoint["feature_cols"]
-        self._scaler_mean = checkpoint["scaler_mean"]
-        self._scaler_std = checkpoint["scaler_std"]
+    def load_model(self, path: str, allow_unsafe_legacy: bool = False) -> None:
+        """Load model weights and config.
+
+        Reads with ``weights_only=True``. The previous default,
+        ``weights_only=False``, unpickles the checkpoint, and unpickling runs
+        arbitrary code embedded in the file — so a tampered or shared model
+        file was remote code execution.
+
+        Args:
+            path: Checkpoint path.
+            allow_unsafe_legacy: Read a pre-version-2 checkpoint by unpickling
+                it. Only pass True for a file you produced yourself; it will
+                execute whatever the file contains. Re-save afterwards to get a
+                safe checkpoint.
+
+        Raises:
+            RuntimeError: For a legacy checkpoint when allow_unsafe_legacy is
+                False.
+        """
+        try:
+            checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        except Exception as e:
+            if not allow_unsafe_legacy:
+                raise RuntimeError(
+                    f"{path} is not a version-{self.CHECKPOINT_FORMAT} checkpoint and "
+                    f"could not be read safely ({e}). Reading it requires unpickling, "
+                    f"which executes code from the file. If you produced this file "
+                    f"yourself, re-load with allow_unsafe_legacy=True and call "
+                    f"save_model() to convert it."
+                ) from e
+            logger.warning(
+                "Unpickling legacy checkpoint %s — this executes code from the file", path,
+            )
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+
+        config = checkpoint["config"]
+        self.config = LSTMConfig(**config) if isinstance(config, dict) else config
+        self.feature_cols = list(checkpoint["feature_cols"])
+        self._scaler_mean = pd.Series(checkpoint["scaler_mean"])
+        self._scaler_std = pd.Series(checkpoint["scaler_std"])
         self.model = _LSTMModel(len(self.feature_cols), self.config).to(self.device)
         self.model.load_state_dict(checkpoint["model_state"])
 

@@ -1,14 +1,8 @@
-fastapi
-uvicorn[standard]
-httpx
-pyyaml
-python-dotenv
-pandas
-numpy>=1.24,<2.0
-requests
-pytest
-pytest-asyncio
-pytest-cov>=4.1
+# Everything the system needs. The required subset lives in
+# requirements-core.txt so CI can install just that with its version bounds
+# applied; everything below here is optional and guarded by an import check at
+# the call site.
+-r requirements-core.txt
 
 # Optional: ML/AI regime classification
 lightgbm>=4.0

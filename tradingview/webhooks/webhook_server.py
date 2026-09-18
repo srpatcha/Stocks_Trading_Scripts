@@ -1191,6 +1191,63 @@ def _cleanup_dedup_cache() -> None:
         del _processed_alerts[k]
 
 
+class StaleAlertError(ValueError):
+    """Raised when an alert's timestamp is missing, unparseable or too old."""
+
+
+def _check_alert_freshness(
+    timestamp: Optional[str],
+    max_skew_seconds: int,
+    require_timestamp: bool,
+) -> None:
+    """Reject alerts whose timestamp is outside the accepted skew window.
+
+    ``AlertPayload.timestamp`` existed but was never read anywhere, so the only
+    replay protection was a five-minute dedup cache keyed on alert_id. A
+    captured signed request stayed valid forever and could be replayed once the
+    cache entry expired — and varying alert_id defeated the cache outright.
+    The timestamp is inside the signed body, so binding freshness to it closes
+    the window without a second signature.
+
+    Args:
+        timestamp: ISO-8601 string from the payload, or None.
+        max_skew_seconds: Accepted age. 0 disables the check entirely.
+        require_timestamp: Whether a missing timestamp is itself a rejection.
+
+    Raises:
+        StaleAlertError: If the alert is missing a required timestamp, the
+            timestamp cannot be parsed, or it falls outside the window.
+    """
+    if max_skew_seconds <= 0:
+        return
+
+    if not timestamp:
+        if require_timestamp:
+            raise StaleAlertError("timestamp required but not provided")
+        return
+
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as e:
+        raise StaleAlertError(f"unparseable timestamp: {timestamp!r}") from e
+
+    if parsed.tzinfo is None:
+        # TradingView's {{timenow}} is UTC but carries no offset.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    age = (datetime.now(timezone.utc) - parsed).total_seconds()
+    if age > max_skew_seconds:
+        raise StaleAlertError(
+            f"alert is {age:.0f}s old, limit is {max_skew_seconds}s"
+        )
+    # A timestamp far in the future is equally suspect — it would keep an alert
+    # replayable well past the window.
+    if age < -max_skew_seconds:
+        raise StaleAlertError(
+            f"alert is {-age:.0f}s in the future, limit is {max_skew_seconds}s"
+        )
+
+
 # ─── Application Factory ───
 def create_app(config_path: str = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -1431,6 +1488,21 @@ def create_app(config_path: str = None) -> FastAPI:
                 logger.warning(f"Invalid passphrase from {client_ip}")
                 raise HTTPException(status_code=401, detail="Invalid passphrase")
 
+        # ── Replay window ──
+        # The timestamp is inside the HMAC-signed body, so checking its age
+        # bounds how long a captured signed request stays usable. Without it
+        # the only limit was a 5-minute dedup cache keyed on alert_id, which a
+        # replayer defeats simply by varying alert_id.
+        try:
+            _check_alert_freshness(
+                alert.timestamp,
+                security_config.get("max_timestamp_skew_seconds", 300),
+                security_config.get("require_timestamp", False),
+            )
+        except StaleAlertError as e:
+            logger.warning("%sRejected stale alert from %s: %s", "", client_ip, e)
+            raise HTTPException(status_code=401, detail="Stale or invalid timestamp")
+
         # ── FIX 1: Idempotency — deduplicate alerts ──
         alert_id = _get_alert_id(payload_dict, raw_body)
         if _is_duplicate_alert(alert_id):
@@ -1611,6 +1683,21 @@ def create_app(config_path: str = None) -> FastAPI:
             if not hmac.compare_digest(str(alert.passphrase or ""), str(expected_passphrase or "")):
                 logger.warning("AI-webhook invalid passphrase from %s", client_ip)
                 raise HTTPException(status_code=401, detail="Invalid passphrase")
+
+        # ── Replay window ──
+        # The timestamp is inside the HMAC-signed body, so checking its age
+        # bounds how long a captured signed request stays usable. Without it
+        # the only limit was a 5-minute dedup cache keyed on alert_id, which a
+        # replayer defeats simply by varying alert_id.
+        try:
+            _check_alert_freshness(
+                alert.timestamp,
+                security_config.get("max_timestamp_skew_seconds", 300),
+                security_config.get("require_timestamp", False),
+            )
+        except StaleAlertError as e:
+            logger.warning("%sRejected stale alert from %s: %s", "AI-webhook: ", client_ip, e)
+            raise HTTPException(status_code=401, detail="Stale or invalid timestamp")
 
         # ── FIX 1: Idempotency — deduplicate alerts ──
         alert_id = _get_alert_id(payload_dict, raw_body)

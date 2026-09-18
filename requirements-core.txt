@@ -1,0 +1,28 @@
+# Core runtime and test dependencies — required.
+#
+# Every entry carries an upper bound. These were previously unconstrained, so
+# `pip install` picked up major releases the code had never been run against,
+# and CI had no way to reproduce a given environment. Bounds are set to the
+# next major version; raise one deliberately after testing against it.
+#
+# These are ranges, not a lockfile. For a byte-reproducible environment:
+#     pip install pip-tools
+#     pip-compile --generate-hashes -o requirements.lock requirements-core.txt
+#
+# Verified against: fastapi 0.141.1, uvicorn 0.53.0, httpx 0.28.1,
+# PyYAML 6.0.3, python-dotenv 1.2.3, pandas 3.0.5, numpy 1.26.4,
+# pydantic 2.13.5, requests 2.34.2, pytest 9.1.1, pytest-asyncio 1.4.0,
+# pytest-cov 7.1.0 on Python 3.12.
+
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+httpx>=0.27,<1.0
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0,<2.0
+pandas>=2.0,<4.0
+numpy>=1.24,<2.0
+pydantic>=2.5,<3.0
+requests>=2.31,<3.0
+pytest>=8.0,<10.0
+pytest-asyncio>=0.23,<2.0
+pytest-cov>=4.1,<8.0

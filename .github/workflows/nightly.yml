@@ -9,6 +9,10 @@ concurrency:
   group: nightly-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only by default; jobs that publish declare their own write scope.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Nightly Tests (Python ${{ matrix.python-version }}, ${{ matrix.os }})

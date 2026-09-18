@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main, master]
 
+# Read-only by default; jobs that publish declare their own write scope.
+permissions:
+  contents: read
+
 jobs:
   # ─── Core Tests ────────────────────────────────────────────────────────────
   test:
@@ -28,17 +32,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
+      # Install the required set from requirements-core.txt so CI honours the
+      # version bounds declared there. The ad-hoc list this replaced was
+      # entirely unpinned, so CI resolved different versions on every run.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy pytest pytest-cov pytest-asyncio
-          pip install lightgbm joblib
-          pip install pyyaml python-dotenv requests
-          pip install fastapi uvicorn httpx pydantic
-          pip install networkx
+          pip install -r requirements-core.txt
+          pip install lightgbm joblib networkx
           pip install vaderSentiment || true
           pip install yfinance feedparser || true
 
@@ -147,7 +151,7 @@ jobs:
           echo "No unsafe eval/exec found"
 
       - name: Audit dependencies for known CVEs
-        run: pip-audit --requirement requirements.txt --strict || true
+        run: pip-audit --requirement requirements-core.txt --strict || true
 
   # ─── Lint ───────────────────────────────────────────────────────────────────
   lint:

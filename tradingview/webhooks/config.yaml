@@ -29,6 +29,18 @@ security:
   require_passphrase: true
   passphrase: "CHANGE_ME_WEBHOOK_PASSPHRASE"
 
+  # Replay window. An alert older (or further in the future) than this is
+  # rejected. The timestamp lives inside the HMAC-signed body, so this bounds
+  # how long a captured signed request stays usable. Set to 0 to disable.
+  max_timestamp_skew_seconds: 300
+  # Set true once every alert template sends a timestamp. Until then an alert
+  # without one is accepted, which leaves the replay window open for any
+  # caller that simply omits the field.
+  #
+  # TradingView alert message JSON should include:
+  #     "timestamp": "{{timenow}}"
+  require_timestamp: false
+
 rate_limiting:
   enabled: true
   max_requests_per_minute: 60

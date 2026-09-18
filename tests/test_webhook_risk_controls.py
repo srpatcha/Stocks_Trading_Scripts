@@ -24,6 +24,8 @@ from pydantic import ValidationError
 
 from tradingview.webhooks.webhook_server import (
     MAX_ORDER_QUANTITY,
+    StaleAlertError,
+    _check_alert_freshness,
     _update_risk_controls,
     HealthMonitor,
     DailyPnLTracker,
@@ -645,3 +647,66 @@ class TestRiskControlsReceiveRealOutcomes:
         _update_risk_controls(app, self._alert("sell", 140.0), 100.0, broker)
         # 80k against a 100k peak is a 20% drawdown — breaker must trip.
         assert app.state.drawdown_breaker.can_trade() is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Replay window — alert freshness
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestAlertFreshness:
+    """AlertPayload.timestamp existed but was never read anywhere.
+
+    The only replay protection was a 5-minute dedup cache keyed on alert_id,
+    which a replayer defeats by varying alert_id — so a captured signed request
+    stayed valid indefinitely.
+    """
+
+    @staticmethod
+    def _iso(offset_seconds):
+        return (datetime.now(timezone.utc)
+                + timedelta(seconds=offset_seconds)).isoformat()
+
+    def test_fresh_alert_is_accepted(self):
+        _check_alert_freshness(self._iso(-10), 300, True)
+
+    def test_stale_alert_is_rejected(self):
+        with pytest.raises(StaleAlertError, match="old"):
+            _check_alert_freshness(self._iso(-600), 300, True)
+
+    def test_boundary_inside_the_window_is_accepted(self):
+        _check_alert_freshness(self._iso(-299), 300, True)
+
+    def test_far_future_alert_is_rejected(self):
+        """A future timestamp would stay replayable past the window."""
+        with pytest.raises(StaleAlertError, match="future"):
+            _check_alert_freshness(self._iso(600), 300, True)
+
+    def test_small_clock_skew_is_tolerated(self):
+        _check_alert_freshness(self._iso(30), 300, True)
+
+    def test_naive_timestamp_is_treated_as_utc(self):
+        """TradingView's {{timenow}} is UTC but carries no offset."""
+        naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        _check_alert_freshness(naive, 300, True)
+
+    def test_trailing_z_is_accepted(self):
+        z = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _check_alert_freshness(z, 300, True)
+
+    def test_unparseable_timestamp_is_rejected(self):
+        with pytest.raises(StaleAlertError, match="unparseable"):
+            _check_alert_freshness("not-a-date", 300, False)
+
+    def test_missing_timestamp_rejected_when_required(self):
+        with pytest.raises(StaleAlertError, match="required"):
+            _check_alert_freshness(None, 300, True)
+
+    def test_missing_timestamp_allowed_when_not_required(self):
+        _check_alert_freshness(None, 300, False)
+
+    def test_zero_skew_disables_the_check(self):
+        """Opt-out must be total, including the required-timestamp rule."""
+        _check_alert_freshness(self._iso(-100_000), 0, True)
+        _check_alert_freshness(None, 0, True)
+        _check_alert_freshness("garbage", 0, True)

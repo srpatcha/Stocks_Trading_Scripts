@@ -9,6 +9,10 @@ concurrency:
   group: weekly-${{ github.ref }}
   cancel-in-progress: false
 
+# Read-only by default; jobs that publish declare their own write scope.
+permissions:
+  contents: read
+
 jobs:
   full-test:
     name: Full Test Suite (Python ${{ matrix.python-version }}, ${{ matrix.os }})
