@@ -19,12 +19,28 @@ Usage:
 from __future__ import annotations
 
 import logging
+from statistics import NormalDist
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_STANDARD_NORMAL = NormalDist()
+
+
+def _norm_ppf(p: float) -> float:
+    """Inverse standard-normal CDF.
+
+    Uses the standard library rather than ``scipy.stats.norm.ppf``. scipy is
+    listed as an optional dependency and is not installed by CI, but the
+    parametric VaR path imported it unconditionally, so that method raised
+    ModuleNotFoundError in any environment that took the "optional" label at
+    face value. ``NormalDist.inv_cdf`` is exact to full double precision and
+    ships with Python.
+    """
+    return _STANDARD_NORMAL.inv_cdf(p)
 
 
 class PortfolioAnalytics:
@@ -59,8 +75,7 @@ class PortfolioAnalytics:
             var = float(np.percentile(clean, (1 - confidence) * 100))
         else:  # parametric
             mu, sigma = float(clean.mean()), float(clean.std())
-            from scipy.stats import norm  # type: ignore[import-untyped]
-            var = float(mu + sigma * norm.ppf(1 - confidence))
+            var = float(mu + sigma * _norm_ppf(1 - confidence))
 
         tail = clean[clean <= var]
         cvar = float(tail.mean()) if len(tail) > 0 else var

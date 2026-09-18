@@ -165,12 +165,27 @@ def setup_logging(config: dict) -> None:
 
 
 # ─── Pydantic Models ───
+
+# Absolute ceiling on a single inbound order. The dollar cap in
+# _check_risk_gates is the real control; this is a schema-level backstop so a
+# malformed or hostile payload cannot ask for an unbounded share count.
+MAX_ORDER_QUANTITY = 1_000_000.0
+
+
 class AlertPayload(BaseModel):
     """TradingView alert webhook payload."""
-    symbol: str = Field(..., description="Trading symbol (e.g., AAPL)")
+    symbol: str = Field(
+        ..., min_length=1, max_length=12, pattern=r"^[A-Za-z0-9.\-:]+$",
+        description="Trading symbol (e.g., AAPL)",
+    )
     action: str = Field(..., description="Trade action: buy, sell, close")
-    price: float = Field(..., ge=0, description="Current price")
-    quantity: Optional[float] = Field(None, ge=0, description="Order quantity")
+    # gt=0, not ge=0. With price=0 the notional cap computed
+    # quantity * 0 == 0, which never exceeds max_trade_value, so the position
+    # size limit was bypassed entirely and the order stayed a market order.
+    price: float = Field(..., gt=0, description="Current price")
+    quantity: Optional[float] = Field(
+        None, gt=0, le=MAX_ORDER_QUANTITY, description="Order quantity",
+    )
     order_type: str = Field("market", description="Order type: market, limit, stop")
     passphrase: Optional[str] = Field(None, description="Webhook passphrase for auth")
     timestamp: Optional[str] = Field(None, description="Alert timestamp")
@@ -660,7 +675,7 @@ class HealthMonitor:
                         self._dispatcher.dispatch(
                             title="Alert Freshness Warning",
                             message=warn_msg,
-                            level="warning",
+                            priority="WARNING",
                         )
                     except Exception:
                         pass
@@ -720,7 +735,7 @@ class HealthMonitor:
             if self._dispatcher:
                 try:
                     self._dispatcher.dispatch(title="Webhook Silence Warning",
-                                              message=msg, level="warning")
+                                              message=msg, priority="WARNING")
                 except Exception:
                     pass
 
@@ -837,6 +852,158 @@ class CooldownManager:
                 "in_cooldown": in_cd,
                 "cooldown_until": until.isoformat() if until else None,
             }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PositionLedger — realized P&L for the risk controls
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class PositionLedger:
+    """Tracks open entries so a closing alert yields a real realized P&L.
+
+    DailyPnLTracker, CooldownManager and DrawdownCircuitBreaker are all
+    outcome-driven, but a webhook only ever sees an instruction — never a
+    result. Without somewhere to remember the entry price, the server fed them
+    ``pnl=0.0`` and ``won=True`` on every order, which pinned the daily loss at
+    zero and reset the loss streak after each trade, so none of the three could
+    ever fire. This is the missing half: remember the open, and compute the
+    realized P&L when it is closed out.
+
+    Average-cost basis, long-only-or-short-only per symbol. Partial closes are
+    supported; an unmatched close (no recorded entry) returns None rather than
+    inventing a number.
+    """
+
+    def __init__(self) -> None:
+        # symbol -> {"quantity": signed float, "avg_price": float}
+        self._positions: Dict[str, Dict[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def record_open(self, symbol: str, quantity: float, price: float) -> None:
+        """Record an entry (or an add to an existing position)."""
+        if quantity == 0 or price <= 0:
+            return
+        with self._lock:
+            pos = self._positions.get(symbol)
+            if pos is None or pos["quantity"] == 0:
+                self._positions[symbol] = {"quantity": quantity, "avg_price": price}
+                return
+            # Same direction: blend into the average cost.
+            if (pos["quantity"] > 0) == (quantity > 0):
+                total_qty = pos["quantity"] + quantity
+                pos["avg_price"] = (
+                    pos["avg_price"] * abs(pos["quantity"]) + price * abs(quantity)
+                ) / abs(total_qty)
+                pos["quantity"] = total_qty
+            else:
+                # Opposite direction is a reduction, not an add.
+                pos["quantity"] += quantity
+
+    def record_close(
+        self, symbol: str, quantity: float, price: float,
+    ) -> Optional[float]:
+        """Close (part of) a position and return its realized P&L.
+
+        Returns None when there is no recorded entry to close against, so the
+        caller can tell "flat trade" from "unknown outcome".
+        """
+        if price <= 0:
+            return None
+        with self._lock:
+            pos = self._positions.get(symbol)
+            if pos is None or pos["quantity"] == 0:
+                return None
+
+            held = pos["quantity"]
+            closing = min(abs(quantity), abs(held)) if quantity else abs(held)
+            if closing <= 0:
+                return None
+
+            if held > 0:
+                pnl = (price - pos["avg_price"]) * closing
+                pos["quantity"] = held - closing
+            else:
+                pnl = (pos["avg_price"] - price) * closing
+                pos["quantity"] = held + closing
+
+            if pos["quantity"] == 0:
+                del self._positions[symbol]
+            return pnl
+
+    def get_open_symbols(self) -> List[str]:
+        with self._lock:
+            return sorted(self._positions)
+
+
+def _update_risk_controls(app, alert: "AlertPayload", quantity: float, broker=None) -> None:
+    """Feed the risk controls the real outcome of a filled order.
+
+    Opening an position has no outcome yet, so only the ledger is touched.
+    Closing one produces a realized P&L, which is what the daily-loss tracker,
+    the loss-streak cooldown and the drawdown breaker all need.
+
+    Replaces an earlier version that passed ``pnl=0.0`` and ``won=True`` on
+    every order and re-fed the breaker its own unchanged equity — three
+    constants that made all three controls mathematically unable to trip.
+    """
+    action = alert.action.lower()
+    ledger = getattr(app.state, "position_ledger", None)
+    if ledger is None:
+        return
+
+    if action in ("buy", "long"):
+        ledger.record_open(alert.symbol, quantity, alert.price)
+        return
+
+    if action not in ("sell", "close", "short", "exit"):
+        return
+
+    signed_qty = -quantity if action == "short" else quantity
+    if action == "short":
+        ledger.record_open(alert.symbol, signed_qty, alert.price)
+        return
+
+    realized = ledger.record_close(alert.symbol, quantity, alert.price)
+    if realized is None:
+        # No recorded entry — the outcome is genuinely unknown. Recording a
+        # guess here is what the old code did; skipping is the honest choice.
+        logger.warning(
+            "Close for %s has no recorded entry; realized P&L unknown, "
+            "risk controls not updated", alert.symbol,
+        )
+        return
+
+    app.state.pnl_tracker.record_trade(alert.symbol, realized)
+    app.state.cooldown_mgr.record_result(alert.strategy or "default", won=realized > 0)
+
+    # Prefer the broker's own equity; fall back to starting equity plus
+    # cumulative realized P&L so the breaker still has a moving series.
+    app.state.realized_pnl_total = (
+        getattr(app.state, "realized_pnl_total", 0.0) + realized
+    )
+    equity = _read_broker_equity(broker)
+    if equity is None and getattr(app.state, "starting_equity", 0.0) > 0:
+        equity = app.state.starting_equity + app.state.realized_pnl_total
+    if equity is not None:
+        app.state.drawdown_breaker.update_equity(equity)
+
+
+def _read_broker_equity(broker) -> Optional[float]:
+    """Best-effort read of live account equity. None when unavailable."""
+    if broker is None:
+        return None
+    try:
+        info = broker.get_account_info() or {}
+    except Exception as e:
+        logger.warning("Could not read broker equity: %s", e)
+        return None
+    for key in ("net_liquidation", "NetLiquidation", "equity", "Equity"):
+        value = info.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1088,7 +1255,12 @@ def create_app(config_path: str = None) -> FastAPI:
     app.state.alert_dispatcher = None
     if AlertDispatcher is not None:
         try:
-            app.state.alert_dispatcher = AlertDispatcher()
+            # AlertDispatcher requires its config section; calling it with no
+            # argument raised TypeError straight into the handler below, so no
+            # notification channel was ever active.
+            app.state.alert_dispatcher = AlertDispatcher(
+                config.get("notifications", {})
+            )
             logger.info("AlertDispatcher initialized successfully")
         except Exception as e:
             logger.warning(f"Failed to initialize AlertDispatcher: {e}")
@@ -1108,6 +1280,15 @@ def create_app(config_path: str = None) -> FastAPI:
         max_drawdown_pct=risk_cfg.get("max_drawdown_pct", 10.0),
         lockout_hours=risk_cfg.get("drawdown_lockout_hours", 24),
     )
+
+    # Entry tracking, so a closing alert produces a real realized P&L to feed
+    # the three controls above.
+    app.state.position_ledger = PositionLedger()
+    app.state.starting_equity = float(risk_cfg.get("starting_equity", 0.0))
+    app.state.realized_pnl_total = 0.0
+    if app.state.starting_equity > 0:
+        # Seed the peak so the drawdown breaker has a baseline to measure from.
+        app.state.drawdown_breaker.update_equity(app.state.starting_equity)
 
     # ─── Health Monitor (FIX 1) ───
     hm_cfg = config.get("health_monitor", {})
@@ -1141,30 +1322,49 @@ def create_app(config_path: str = None) -> FastAPI:
         return response
 
     # ─── Health Endpoint (enhanced — FIX 1) ───
+    def _authorize_read_endpoint(request: Request) -> None:
+        """Apply the webhook's IP allowlist and HMAC gate to a read endpoint.
+
+        /status returns live brokerage balances and account identifiers, so it
+        needs the same gate as the order endpoints. Raises HTTPException when
+        the caller is not authorised.
+        """
+        security_config = config.get("security", {})
+        client_ip = request.client.host if request.client else "unknown"
+
+        allowed_ips = security_config.get("allowed_ips", [])
+        if allowed_ips and client_ip not in allowed_ips:
+            logger.warning("Rejected read request from unauthorized IP: %s", client_ip)
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        hmac_secret = security_config.get("hmac_secret", "")
+        if hmac_secret and hmac_secret != "CHANGE_ME_TO_A_SECURE_SECRET_KEY":
+            signature = request.headers.get("X-Webhook-Signature", "")
+            algorithm = security_config.get("hmac_algorithm", "sha256")
+            # GET has no body; the signature is taken over the path so a
+            # signature captured for one endpoint cannot be replayed at another.
+            if not validate_hmac_signature(
+                request.url.path.encode(), signature, hmac_secret, algorithm
+            ):
+                logger.warning("Invalid signature on read endpoint from %s", client_ip)
+                raise HTTPException(status_code=401, detail="Not authorized")
+
     @app.get("/health")
     async def health_check():
-        """Health check endpoint returning server status, uptime, and risk status."""
+        """Liveness probe. Deliberately carries no financial information.
+
+        This endpoint is unauthenticated so uptime monitors and container
+        healthchecks can reach it, so daily P&L, equity, drawdown and sector
+        exposure are not reported here — they moved to /status, which is
+        authenticated. Reporting an account's P&L to anonymous callers is not
+        something a liveness probe needs to do.
+        """
         hm = app.state.health_monitor
-        uptime = hm.uptime_seconds
-        last_alert = (
-            hm.last_alert_time.isoformat() if hm.last_alert_time else None
-        )
 
         return JSONResponse(content={
             "status": "ok",
-            "uptime": round(uptime, 2),
-            "last_alert_time": last_alert,
-            "alerts_processed": hm.alerts_processed,
+            "uptime": round(hm.uptime_seconds, 2),
             "version": server_config.get("version", "1.0.0"),
-            "latency": hm.get_latency_stats(),
-            "alert_freshness": hm.check_alert_freshness()["detail"],
-            "risk": {
-                "daily_pnl": app.state.pnl_tracker.daily_pnl,
-                "daily_trade_count": app.state.pnl_tracker.trade_count,
-                "daily_loss_limit_ok": app.state.pnl_tracker.can_trade(),
-                "drawdown": app.state.drawdown_breaker.get_status(),
-                "sector_exposure": dict(app.state.sector_tracker),
-            },
         })
 
     # ─── Webhook Endpoint ───
@@ -1216,6 +1416,21 @@ def create_app(config_path: str = None) -> FastAPI:
             logger.error(f"Invalid payload from {client_ip}: {e}")
             raise HTTPException(status_code=422, detail=f"Invalid payload: {str(e)}")
 
+        # ── Passphrase Validation ──
+        # Fix 6: constant-time passphrase comparison
+        #
+        # Must run BEFORE the dedup cache is touched. With dedup first, an
+        # unauthenticated caller could pre-poison the cache with a guessed
+        # alert_id so the genuine TradingView alert that followed was dropped
+        # as a "duplicate" — suppression of a real trading signal without ever
+        # knowing the passphrase. /ai-webhook already had the correct order.
+        if security_config.get("require_passphrase", False):
+            expected_passphrase = security_config.get("passphrase", "")
+            received = alert.passphrase or ""
+            if not hmac.compare_digest(received, expected_passphrase):
+                logger.warning(f"Invalid passphrase from {client_ip}")
+                raise HTTPException(status_code=401, detail="Invalid passphrase")
+
         # ── FIX 1: Idempotency — deduplicate alerts ──
         alert_id = _get_alert_id(payload_dict, raw_body)
         if _is_duplicate_alert(alert_id):
@@ -1223,15 +1438,6 @@ def create_app(config_path: str = None) -> FastAPI:
             return JSONResponse(status_code=200, content={
                 "status": "duplicate", "alert_id": alert_id,
             })
-
-        # ── Passphrase Validation ──
-        # Fix 6: constant-time passphrase comparison
-        if security_config.get("require_passphrase", False):
-            expected_passphrase = security_config.get("passphrase", "")
-            received = alert.passphrase or ""
-            if not hmac.compare_digest(received, expected_passphrase):
-                logger.warning(f"Invalid passphrase from {client_ip}")
-                raise HTTPException(status_code=401, detail="Invalid passphrase")
 
         # ── Validate Action ──
         valid_actions = {"buy", "sell", "close", "long", "short"}
@@ -1319,7 +1525,7 @@ def create_app(config_path: str = None) -> FastAPI:
                         f"Broker: {broker.name}\n"
                         f"Order ID: {order_result.order_id}"
                     ),
-                    level="info",
+                    priority="INFO",
                 )
             except Exception as e:
                 logger.warning(f"Notification dispatch failed: {e}")
@@ -1327,13 +1533,7 @@ def create_app(config_path: str = None) -> FastAPI:
         # ── FIX 5: Wire risk controls to actual trade results ──
         if order_result.success:
             try:
-                pnl = 0.0  # P&L calculated on close; record 0 on open for tracking
-                app.state.pnl_tracker.record_trade(alert.symbol, pnl)
-                app.state.drawdown_breaker.update_equity(
-                    app.state.drawdown_breaker._current_equity
-                )
-                strategy = alert.strategy or "default"
-                app.state.cooldown_mgr.record_result(strategy, won=True)
+                _update_risk_controls(app, alert, quantity, broker)
             except Exception as risk_exc:
                 logger.warning("Risk control update failed: %s", risk_exc)
 
@@ -1533,13 +1733,7 @@ def create_app(config_path: str = None) -> FastAPI:
         # ── FIX 5: Wire risk controls to actual trade results ──
         if order_result.success:
             try:
-                pnl = 0.0
-                app.state.pnl_tracker.record_trade(alert.symbol, pnl)
-                app.state.drawdown_breaker.update_equity(
-                    app.state.drawdown_breaker._current_equity
-                )
-                strategy = alert.strategy or "default"
-                app.state.cooldown_mgr.record_result(strategy, won=True)
+                _update_risk_controls(app, alert, quantity, broker)
             except Exception as risk_exc:
                 logger.warning("AI-webhook risk control update failed: %s", risk_exc)
 
@@ -1555,7 +1749,7 @@ def create_app(config_path: str = None) -> FastAPI:
                         f"TV Signal: {alert.action} {alert.symbol} @ {alert.price}"
                         f"{ai_note}\nBroker: {broker.name} → {order_result.order_id}"
                     ),
-                    level="info",
+                    priority="INFO",
                 )
             except Exception:
                 pass
@@ -1578,8 +1772,16 @@ def create_app(config_path: str = None) -> FastAPI:
 
     # ─── Status Endpoint ──
     @app.get("/status")
-    async def server_status():
-        """Get detailed server status including broker connections."""
+    async def server_status(request: Request):
+        """Detailed status, including live broker balances. Authenticated.
+
+        get_account_info() returns net liquidation, buying power and the full
+        brokerage account identifier. This endpoint had no authentication at
+        all, so a plain ``curl http://host:5000/status`` disclosed the account
+        number and its net worth.
+        """
+        _authorize_read_endpoint(request)
+
         brokers = app.state.broker_router.get_all_brokers()
         broker_status = {}
         for name, adapter in brokers.items():
@@ -1587,13 +1789,26 @@ def create_app(config_path: str = None) -> FastAPI:
                 info = adapter.get_account_info()
                 broker_status[name] = info
             except Exception as e:
-                broker_status[name] = {"error": str(e)}
+                # Broker error text can carry request/response detail; log it
+                # in full, return only that something failed.
+                logger.warning("get_account_info failed for %s: %s", name, e)
+                broker_status[name] = {"error": "unavailable"}
 
         return {
             "server": "running",
             "uptime_seconds": round(time.time() - app.state.start_time, 2),
             "total_alerts": app.state.total_alerts,
             "brokers": broker_status,
+            "risk": {
+                "daily_pnl": app.state.pnl_tracker.daily_pnl,
+                "daily_trade_count": app.state.pnl_tracker.trade_count,
+                "daily_loss_limit_ok": app.state.pnl_tracker.can_trade(),
+                "drawdown": app.state.drawdown_breaker.get_status(),
+                "sector_exposure": dict(app.state.sector_tracker),
+                "open_positions": app.state.position_ledger.get_open_symbols(),
+            },
+            "latency": app.state.health_monitor.get_latency_stats(),
+            "alert_freshness": app.state.health_monitor.check_alert_freshness()["detail"],
             "rate_limiting": {
                 "enabled": config.get("rate_limiting", {}).get("enabled", True),
                 "max_per_minute": config.get("rate_limiting", {}).get(
@@ -1649,7 +1864,7 @@ if __name__ == "__main__":
             app.state.alert_dispatcher.dispatch(
                 title="Webhook Server Started",
                 message=startup_msg,
-                level="info",
+                priority="INFO",
             )
         except Exception:
             pass
@@ -1687,7 +1902,7 @@ if __name__ == "__main__":
                     app.state.alert_dispatcher.dispatch(
                         title="Webhook Server CRASH",
                         message=f"Crash #{restart_count}: {exc}. Restarting\u2026",
-                        level="critical",
+                        priority="CRITICAL",
                     )
                 except Exception:
                     pass
@@ -1700,7 +1915,7 @@ if __name__ == "__main__":
                 app.state.alert_dispatcher.dispatch(
                     title="Webhook Server DEAD",
                     message=f"Exhausted {max_restarts} restarts. Manual intervention required.",
-                    level="critical",
+                    priority="CRITICAL",
                 )
             except Exception:
                 pass

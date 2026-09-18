@@ -80,6 +80,9 @@ class LiveRunner:
         use_news: Whether to analyze news sentiment.
         db_path: Path to trade memory database.
         models: ML models to train ("regime", "lstm", "transformer", "rl").
+        risk_manager: Optional shared RiskManager. Passed through to the
+            BrokerBridge so per-trade risk sizing and its gates apply to real
+            orders, not just to the paper simulator.
     """
 
     def __init__(
@@ -92,6 +95,7 @@ class LiveRunner:
         models: Optional[List[str]] = None,
         broker: Optional[str] = None,
         broker_config: Optional[Dict[str, Any]] = None,
+        risk_manager: Optional[Any] = None,
     ) -> None:
         self._symbols = symbols
         self._mode = mode
@@ -100,6 +104,7 @@ class LiveRunner:
         self._running = False
         self._cycle_count = 0
         self._broker_name = broker
+        self._broker_config: Dict[str, Any] = broker_config or {}
 
         # Default paths
         if db_path is None:
@@ -136,6 +141,7 @@ class LiveRunner:
                     broker=broker,
                     config=broker_config or {},
                     mode=mode,
+                    risk_manager=risk_manager,
                 )
                 logger.info("BrokerBridge initialized: %s (%s mode)", broker, mode)
             except Exception as e:
@@ -159,8 +165,9 @@ class LiveRunner:
         # Market hours enforcement
         self._market_hours = MarketHours()
 
-        # Risk manager (optional, set externally or from agent)
-        self._risk_manager = None
+        # Risk manager (optional). Also handed to the BrokerBridge above so
+        # per-trade risk sizing actually applies on the live order path.
+        self._risk_manager = risk_manager
 
         # Signal handler for graceful shutdown (Fix 17: guard for non-main thread)
         try:
@@ -245,14 +252,20 @@ class LiveRunner:
                     if hasattr(self, '_broker_bridge') and self._broker_bridge:
                         try:
                             from shared.notifier import AlertDispatcher
-                            dispatcher = AlertDispatcher()
+                            # AlertDispatcher requires a config dict, and
+                            # dispatch() takes priority=, not level=. Both were
+                            # wrong, so the TypeError went into the bare except
+                            # below and this alert never actually fired.
+                            dispatcher = AlertDispatcher(
+                                self._broker_config.get("notifications", {})
+                            )
                             dispatcher.dispatch(
                                 title="LiveRunner Error Escalation",
                                 message=alert_msg,
-                                level="warning",
+                                priority="WARNING",
                             )
-                        except Exception:
-                            pass
+                        except Exception as alert_exc:
+                            logger.error("Error-escalation alert failed: %s", alert_exc)
                 time.sleep(60)
 
         self._shutdown()
@@ -785,20 +798,25 @@ class LiveRunner:
                 except Exception as e:
                     logger.error("Failed to flatten %s: %s", symbol, e)
 
-        # Close broker positions
+        # Close broker positions.
+        #
+        # This used to iterate get_positions() — a Dict[str, Position] — and
+        # call pos.get("symbol") on each dict *key*, i.e. on a str. Every
+        # iteration raised AttributeError, which the except below swallowed, so
+        # broker positions were never flattened at EOD or on shutdown. It also
+        # passed price=0, which would have booked a fabricated -100% P&L.
+        # close_all_positions() already does this correctly: it fetches the
+        # live price, falls back to the entry price, and routes through
+        # _close_position so the portfolio gate and agent memory both update.
         if self._broker_bridge and self._broker_bridge.is_connected():
             try:
-                positions = self._broker_bridge.get_positions()
-                for pos in positions:
-                    sym = pos.get("symbol", "")
-                    qty = pos.get("quantity", 0)
-                    if qty != 0:
-                        action = "SELL" if qty > 0 else "BUY"
-                        logger.info("  EOD flatten: %s %d %s via broker", action, abs(qty), sym)
-                        self._broker_bridge.execute_decision(
-                            {"action": action, "confidence": 1.0, "price": 0},
-                            sym,
-                            agent=self._agent,
+                results = self._broker_bridge.close_all_positions(agent=self._agent)
+                for result in results:
+                    if result.success:
+                        logger.info("  EOD flatten: closed %s via broker", result.symbol)
+                    else:
+                        logger.error(
+                            "  EOD flatten FAILED for %s: %s", result.symbol, result.message,
                         )
             except Exception as e:
                 logger.error("Failed to flatten broker positions: %s", e)

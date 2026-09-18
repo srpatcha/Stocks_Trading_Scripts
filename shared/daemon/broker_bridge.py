@@ -143,13 +143,23 @@ class BaseBrokerAdapter(ABC):
     def place_limit_order(self, symbol: str, action: str, quantity: int, price: float) -> ExecutionResult: ...
 
     def place_stop_order(self, symbol: str, action: str, quantity: int, stop_price: float) -> ExecutionResult:
-        """Place a stop order. Default falls back to limit order if not overridden."""
-        logger.warning(
-            "place_stop_order() not implemented for %s — falling back to limit order. "
-            "This may NOT execute as a true stop order!",
+        """Place a stop order. Fails closed when the adapter has no stop support.
+
+        This used to fall back to ``place_limit_order(..., stop_price)``. That is
+        not a degraded stop — a SELL limit below the market (or a BUY limit
+        above it) is immediately marketable, so the "protective stop" filled at
+        once and closed the very position it was created to guard. Reporting
+        failure lets the caller decide, instead of silently flattening.
+        """
+        logger.error(
+            "place_stop_order() not implemented for %s — refusing to substitute a "
+            "marketable limit order. The position is UNPROTECTED.",
             getattr(self, '_name', 'unknown'),
         )
-        return self.place_limit_order(symbol, action, quantity, stop_price)
+        return ExecutionResult(
+            False, getattr(self, '_name', 'unknown'), symbol, action, quantity, stop_price,
+            message="stop orders unsupported by this adapter; no protective order placed",
+        )
 
     @abstractmethod
     def cancel_order(self, order_id: str) -> bool: ...
@@ -305,8 +315,11 @@ class IBAdapter(BaseBrokerAdapter):
             return ExecutionResult(True, self.name, symbol, action, quantity, stop_price, order_id=order_id,
                                    message=f"Stop order: {action} {quantity} {symbol} @ ${stop_price:.2f}")
         except Exception as e:
-            logger.warning("IB native stop order failed, falling back to limit: %s", e)
-            return self.place_limit_order(symbol, action, quantity, stop_price)
+            # Do NOT fall back to a limit order at stop_price — it is marketable
+            # and would immediately close the position this stop protects.
+            logger.error("IB native stop order failed — position UNPROTECTED: %s", e)
+            return ExecutionResult(False, self.name, symbol, action, quantity, stop_price,
+                                   message=f"stop order failed, no protective order placed: {e}")
 
     def cancel_order(self, order_id: str) -> bool:
         if self._order_manager:
@@ -429,8 +442,11 @@ class TradeStationAdapter(BaseBrokerAdapter):
             return ExecutionResult(True, self.name, symbol, action, quantity, stop_price, order_id=order_id,
                                    message=f"TS stop order: {action} {quantity} {symbol} @ ${stop_price:.2f}")
         except Exception as e:
-            logger.warning("TradeStation native stop order failed, falling back to limit: %s", e)
-            return self.place_limit_order(symbol, action, quantity, stop_price)
+            # See BaseBrokerAdapter.place_stop_order — a limit at stop_price is
+            # marketable and would flatten the position it is meant to protect.
+            logger.error("TradeStation stop order failed — position UNPROTECTED: %s", e)
+            return ExecutionResult(False, self.name, symbol, action, quantity, stop_price,
+                                   message=f"stop order failed, no protective order placed: {e}")
 
     def cancel_order(self, order_id: str) -> bool:
         # FIX 14: Match order_router.cancel_order(order_id) signature (no account_id)
@@ -539,8 +555,11 @@ class SchwabAdapter(BaseBrokerAdapter):
             return ExecutionResult(True, self.name, symbol, action, quantity, stop_price, order_id=order_id,
                                    message=f"Schwab stop order: {action} {quantity} {symbol} @ ${stop_price:.2f}")
         except Exception as e:
-            logger.warning("Schwab native stop order failed, falling back to limit: %s", e)
-            return self.place_limit_order(symbol, action, quantity, stop_price)
+            # See BaseBrokerAdapter.place_stop_order — a limit at stop_price is
+            # marketable and would flatten the position it is meant to protect.
+            logger.error("Schwab stop order failed — position UNPROTECTED: %s", e)
+            return ExecutionResult(False, self.name, symbol, action, quantity, stop_price,
+                                   message=f"stop order failed, no protective order placed: {e}")
 
     def cancel_order(self, order_id: str) -> bool:
         if self._client:
@@ -603,6 +622,9 @@ class BrokerBridge:
         default_tp_pct: Default take-profit distance as % of entry.
         default_sl_pct: Default stop-loss distance as % of entry.
         diary_path: Path to JSONL trade diary file.
+        risk_manager: Optional shared RiskManager. When supplied, position
+            sizing goes through its per-trade risk rules instead of the flat
+            ``max_position_pct`` fallback, and a size of 0 blocks the order.
     """
 
     BROKERS = {
@@ -629,6 +651,7 @@ class BrokerBridge:
         diary_path: Optional[str] = None,
         commission: Optional[CommissionModel] = None,
         max_holding_bars: int = 240,
+        risk_manager: Optional[Any] = None,
     ) -> None:
         self._broker_name = broker.lower()
         self._config = config or {}
@@ -662,8 +685,11 @@ class BrokerBridge:
         # Trailing stops
         self._trailing_stops: Dict[str, TrailingStop] = {}
 
-        # Optional RiskManager (set externally)
-        self._risk_manager: Optional[Any] = None
+        # Optional RiskManager. There was no way to supply one: the attribute
+        # was set to None here and never assigned anywhere in the repository,
+        # so _calculate_shares always fell through to a flat 10% of a static
+        # $100k and the per-trade risk limit was never applied on a live path.
+        self._risk_manager: Optional[Any] = risk_manager
 
         # Unified portfolio risk gate (cross-strategy coordination)
         self._portfolio_gate = UnifiedPortfolioRiskGate.get_instance()
@@ -759,6 +785,12 @@ class BrokerBridge:
                 self._close_position(symbol, price, agent)
 
             shares = self._calculate_shares(price)
+            if shares <= 0:
+                logger.warning("Sizing returned 0 shares for %s — order refused", symbol)
+                return ExecutionResult(
+                    False, self._adapter.name, symbol, action, 0, price,
+                    message="position sizing returned 0 shares",
+                )
             notional = shares * price if price > 0 else 0
 
             gate_ok, gate_reason = self._portfolio_gate.can_open_position(symbol, notional)
@@ -821,6 +853,12 @@ class BrokerBridge:
                 return None
 
             shares = self._calculate_shares(price)
+            if shares <= 0:
+                logger.warning("Sizing returned 0 shares for %s — order refused", symbol)
+                return ExecutionResult(
+                    False, self._adapter.name, symbol, action, 0, price,
+                    message="position sizing returned 0 shares",
+                )
             notional = shares * price if price > 0 else 0
 
             gate_ok, gate_reason = self._portfolio_gate.can_open_position(symbol, notional)
@@ -949,9 +987,15 @@ class BrokerBridge:
                     stop_price=stop_price,
                 )
                 rm_shares = size_result if isinstance(size_result, int) else getattr(size_result, 'shares', size_result)
+                # A RiskManager returning 0 is a rejection — the position does
+                # not fit inside its caps. Falling through to the default
+                # sizing here would silently overrule the risk manager.
                 return min(int(rm_shares), self._max_shares)
             except Exception as e:
-                logger.warning("RiskManager sizing failed, falling back to default: %s", e)
+                # Fail closed: a sizing error must not quietly become a
+                # full-size default position.
+                logger.error("RiskManager sizing failed, refusing to size the order: %s", e)
+                return 0
 
         dollar_amount = self._capital * self._max_position_pct
         shares = int(dollar_amount / price)
@@ -1025,15 +1069,27 @@ class BrokerBridge:
             pos = self._positions.get(symbol)
         if pos:
             if pos.direction == "long":
-                pnl = (fill_price - pos.entry_price) * pos.shares
+                raw_pnl = (fill_price - pos.entry_price) * pos.shares
             else:
-                pnl = (pos.entry_price - fill_price) * pos.shares
+                raw_pnl = (pos.entry_price - fill_price) * pos.shares
+
+            # Match _close_position: commissions on both legs, so the P&L that
+            # reaches the portfolio gate is the same number either exit path
+            # would produce.
+            entry_comm = self._commission.calculate_commission(pos.shares, pos.entry_price)
+            exit_comm = self._commission.calculate_commission(pos.shares, fill_price)
+            pnl = raw_pnl - entry_comm - exit_comm
 
             emoji = "✅" if pnl > 0 else "❌"
             logger.info("%s TP/SL fill: %s %s | P&L=$%.2f", emoji, pos.direction.upper(), symbol, pnl)
             with self._position_lock:
                 self._positions.pop(symbol, None)
             self._trailing_stops.pop(symbol, None)
+
+            # A TP/SL fill is the normal way a position closes. Without this the
+            # gate's exposure only ever grew (eventually blocking all trading)
+            # and realized P&L never reached the daily-loss limit.
+            self._portfolio_gate.close_position(symbol, pnl)
 
     # ─── TP/SL Auto-Management (from hyperliquid-trading-agent) ───
 
@@ -1087,8 +1143,10 @@ class BrokerBridge:
                 if sl_result.success:
                     sl_order_id = sl_result.order_id
                     logger.info("  SL placed (STOP): %s %s @ $%.2f [order=%s]", symbol, close_action, sl_price, sl_order_id)
+                else:
+                    logger.error("  SL stop order rejected: %s", sl_result.message)
             except Exception as e:
-                logger.warning("  SL stop order failed: %s", e)
+                logger.error("  SL stop order failed: %s", e)
 
             # Track OCO pair
             if tp_order_id and sl_order_id:
@@ -1096,10 +1154,41 @@ class BrokerBridge:
                 self._oco_pairs[sl_order_id] = tp_order_id
                 logger.info("  OCO pair linked: TP=%s <-> SL=%s", tp_order_id, sl_order_id)
 
-            logger.info(
-                "  Auto TP/SL for %s: TP=$%.2f (+%.1f%%), SL=$%.2f (-%.1f%%)",
-                symbol, tp_price, self._default_tp_pct, sl_price, self._default_sl_pct,
+            # Report what was actually placed, not what was intended. An open
+            # position with no stop is the single most dangerous state here, so
+            # it escalates rather than being buried in an info line.
+            if sl_order_id:
+                logger.info(
+                    "  Auto TP/SL for %s: TP=$%.2f (+%.1f%%), SL=$%.2f (-%.1f%%)",
+                    symbol, tp_price, self._default_tp_pct, sl_price, self._default_sl_pct,
+                )
+            else:
+                logger.critical(
+                    "  %s is OPEN WITHOUT A STOP LOSS (%d shares, entry $%.2f, intended SL $%.2f) — "
+                    "manual intervention required",
+                    symbol, order_shares, entry_price, sl_price,
+                )
+                self._notify_unprotected_position(symbol, order_shares, entry_price, sl_price)
+
+    def _notify_unprotected_position(
+        self, symbol: str, shares: int, entry_price: float, intended_sl: float,
+    ) -> None:
+        """Escalate an open position that has no stop-loss order behind it."""
+        try:
+            from shared.notifier import AlertDispatcher
+            notify_config = self._config.get("notifications", {})
+            AlertDispatcher(notify_config).dispatch(
+                title=f"UNPROTECTED POSITION: {symbol}",
+                message=(
+                    f"{shares} shares of {symbol} are open at ${entry_price:.2f} with no "
+                    f"stop-loss order. The intended stop was ${intended_sl:.2f}. "
+                    f"Close the position or place the stop manually."
+                ),
+                priority="CRITICAL",
             )
+        except Exception as e:
+            # The log line above already recorded the condition at CRITICAL.
+            logger.error("Could not dispatch unprotected-position alert: %s", e)
 
     # ─── Trailing Stops ───
 
@@ -1299,13 +1388,23 @@ class BrokerBridge:
             if abs(qty) > 0:
                 broker_symbols.add(sym)
 
-    # Remove stale local positions
+        # Remove stale local positions
         with self._position_lock:
             for sym in list(self._positions.keys()):
                 if sym not in broker_symbols:
                     logger.info("Reconcile: removing stale position %s (not on broker)", sym)
                     reconciliation["removed"].append(sym)
                     del self._positions[sym]
+
+        # Release the gate's exposure for anything we just dropped. Without
+        # this, reconciliation leaked notional into _total_exposure until the
+        # gate refused every new position. P&L is unknown for a position that
+        # vanished from the broker, so record 0 rather than inventing a number.
+        for sym in reconciliation["removed"]:
+            try:
+                self._portfolio_gate.close_position(sym, 0.0)
+            except Exception as e:
+                logger.warning("Reconcile: could not release gate exposure for %s: %s", sym, e)
 
         # FIX 6: Adopt broker positions not tracked locally
         for bp in broker_positions:

@@ -62,6 +62,17 @@ class MockAdapter(BaseBrokerAdapter):
         self._orders.append({"symbol": symbol, "action": action, "qty": quantity, "price": price, "type": "limit"})
         return ExecutionResult(True, self.name, symbol, action, quantity, price, order_id=oid)
 
+    def place_stop_order(self, symbol, action, quantity, stop_price):
+        # A stop-capable broker. BaseBrokerAdapter.place_stop_order now fails
+        # closed, so tests about TP/SL pairing need an adapter that really
+        # supports stops rather than relying on the old limit-order fallback.
+        oid = f"STP-{len(self._orders)}"
+        self._orders.append({
+            "symbol": symbol, "action": action, "qty": quantity,
+            "price": stop_price, "type": "stop",
+        })
+        return ExecutionResult(True, self.name, symbol, action, quantity, stop_price, order_id=oid)
+
     def cancel_order(self, order_id):
         return True
 
@@ -196,14 +207,20 @@ class TestCalculateShares:
 # ── _place_tp_sl: BOTH TP and SL ────────────────────────────────────────
 
 class TestPlaceTpSl:
+    # The take-profit is a limit order and the stop-loss is a STOP order. They
+    # are asserted separately: a stop-loss submitted as a limit at the stop
+    # price is marketable and would close the position immediately.
+
     def test_both_placed_long(self):
         a = MockAdapter()
         bridge = _make_bridge(adapter=a, default_tp_pct=3.0, default_sl_pct=2.0)
         bridge._positions["AAPL"] = Position("AAPL", "long", 100, 150.0, "t")
         bridge._place_tp_sl("AAPL", 150.0, "long")
         limits = [o for o in a._orders if o["type"] == "limit"]
-        assert len(limits) == 2
-        assert all(o["action"] == "SELL" for o in limits)
+        stops = [o for o in a._orders if o["type"] == "stop"]
+        assert len(limits) == 1
+        assert len(stops) == 1
+        assert all(o["action"] == "SELL" for o in limits + stops)
 
     def test_both_placed_short(self):
         a = MockAdapter()
@@ -211,8 +228,10 @@ class TestPlaceTpSl:
         bridge._positions["AAPL"] = Position("AAPL", "short", 100, 150.0, "t")
         bridge._place_tp_sl("AAPL", 150.0, "short")
         limits = [o for o in a._orders if o["type"] == "limit"]
-        assert len(limits) == 2
-        assert all(o["action"] == "BUY" for o in limits)
+        stops = [o for o in a._orders if o["type"] == "stop"]
+        assert len(limits) == 1
+        assert len(stops) == 1
+        assert all(o["action"] == "BUY" for o in limits + stops)
 
     def test_tp_price_long(self):
         a = MockAdapter()
@@ -220,8 +239,9 @@ class TestPlaceTpSl:
         bridge._positions["X"] = Position("X", "long", 10, 100.0, "t")
         bridge._place_tp_sl("X", 100.0, "long")
         limits = [o for o in a._orders if o["type"] == "limit"]
+        stops = [o for o in a._orders if o["type"] == "stop"]
         assert limits[0]["price"] == pytest.approx(105.0)
-        assert limits[1]["price"] == pytest.approx(97.0)
+        assert stops[0]["price"] == pytest.approx(97.0)
 
     def test_tp_price_short(self):
         a = MockAdapter()
@@ -229,8 +249,9 @@ class TestPlaceTpSl:
         bridge._positions["X"] = Position("X", "short", 10, 100.0, "t")
         bridge._place_tp_sl("X", 100.0, "short")
         limits = [o for o in a._orders if o["type"] == "limit"]
+        stops = [o for o in a._orders if o["type"] == "stop"]
         assert limits[0]["price"] == pytest.approx(95.0)
-        assert limits[1]["price"] == pytest.approx(103.0)
+        assert stops[0]["price"] == pytest.approx(103.0)
 
     def test_custom_overrides(self):
         a = MockAdapter()
@@ -238,8 +259,9 @@ class TestPlaceTpSl:
         bridge._positions["X"] = Position("X", "long", 10, 150.0, "t")
         bridge._place_tp_sl("X", 150.0, "long", tp_price=160.0, sl_price=140.0)
         limits = [o for o in a._orders if o["type"] == "limit"]
+        stops = [o for o in a._orders if o["type"] == "stop"]
         assert limits[0]["price"] == 160.0
-        assert limits[1]["price"] == 140.0
+        assert stops[0]["price"] == 140.0
 
     def test_no_position_no_orders(self):
         a = MockAdapter()
@@ -685,13 +707,18 @@ class TestRiskManagerSizing:
         shares = bridge._calculate_shares(100.0)
         assert shares == 50
 
-    def test_risk_manager_fallback_on_error(self):
+    def test_risk_manager_error_fails_closed(self):
+        """A sizing error must block the order, not fall back to full size.
+
+        Falling back to max_position_pct meant any exception inside the risk
+        manager silently produced a normal-sized unprotected position — the
+        risk manager failing was indistinguishable from it approving.
+        """
         bridge = _make_bridge(capital=100_000, max_position_pct=0.10, max_shares=500)
         mock_rm = MagicMock()
         mock_rm.calculate_position_size.side_effect = RuntimeError("error")
         bridge._risk_manager = mock_rm
-        shares = bridge._calculate_shares(50.0)
-        assert shares == 200
+        assert bridge._calculate_shares(50.0) == 0
 
 
 # ── place_stop_order ─────────────────────────────────────────────────────
@@ -721,11 +748,43 @@ class TestPlaceStopOrder:
         assert len(stop_adapter._stop_orders) == 1
         assert stop_adapter._stop_orders[0]["stop_price"] == pytest.approx(98.0)
 
-    def test_base_adapter_stop_fallback_to_limit(self):
-        a = MockAdapter()
+    def test_base_adapter_stop_fails_closed(self):
+        """An adapter without stop support must NOT substitute a limit order.
+
+        A SELL limit at the stop price is below the market, i.e. immediately
+        marketable, so the old fallback closed the position the stop was meant
+        to protect. The adapter must report failure and place nothing.
+        """
+        class NoStopAdapter(MockAdapter):
+            # Inherit everything except stop support, so the abstract base
+            # class's fail-closed default is what gets exercised.
+            place_stop_order = BaseBrokerAdapter.place_stop_order
+
+        a = NoStopAdapter()
         result = a.place_stop_order("AAPL", "SELL", 10, 95.0)
-        assert result.success
-        assert any(o["type"] == "limit" and o["price"] == 95.0 for o in a._orders)
+
+        assert result.success is False
+        assert "no protective order" in result.message
+        assert a._orders == [], "no order may be sent to the broker"
+
+    def test_unprotected_position_escalates_when_stop_fails(self):
+        """A position left without a stop must be reported, not logged quietly."""
+        class NoStopAdapter(MockAdapter):
+            place_stop_order = BaseBrokerAdapter.place_stop_order
+
+        a = NoStopAdapter()
+        bridge = _make_bridge(adapter=a)
+        bridge._positions["X"] = Position("X", "long", 10, 100.0, "t")
+
+        with patch.object(bridge, "_notify_unprotected_position") as notify:
+            bridge._place_tp_sl("X", 100.0, "long")
+
+        notify.assert_called_once()
+        assert notify.call_args[0][0] == "X"
+        # TP still went out; only the stop is missing, and no OCO pair exists
+        # because there is nothing to pair the take-profit against.
+        assert any(o["type"] == "limit" for o in a._orders)
+        assert bridge._oco_pairs == {}
 
 
 # ── Additional coverage: close_all_positions ─────────────────────────────
@@ -898,3 +957,112 @@ class TestExecuteDecisionDiary:
         bridge = BrokerBridge(broker="ib", mode="paper")
         bridge._adapter = MockAdapter()
         assert ".stocks_plugin" in bridge._diary_path
+
+
+# ── RiskManager wiring ────────────────────────────────────────────────────
+
+class TestRiskManagerWiring:
+    """BrokerBridge must be able to take a RiskManager and honour it.
+
+    The attribute existed but nothing could set it, so _calculate_shares always
+    fell through to a flat 10% of a static $100k and the per-trade risk limit
+    never applied to a real order.
+    """
+
+    def test_risk_manager_is_accepted_and_used_for_sizing(self):
+        from shared.risk_manager import RiskManager, RiskManagerConfig, SizingMethod
+
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_FRACTIONAL,
+            risk_per_trade_pct=1.0,
+            total_capital=100_000.0,
+            max_position_pct_equity=25.0,
+        ))
+        bridge = _make_bridge(adapter=MockAdapter(), risk_manager=rm)
+
+        assert bridge._risk_manager is rm
+        # 25% of $100k at $150 is 166 shares — the risk manager's cap, not the
+        # bridge's flat 10% default (which would be 66).
+        assert bridge._calculate_shares(150.0) == 166
+
+    def test_default_sizing_still_applies_without_a_risk_manager(self):
+        bridge = _make_bridge(adapter=MockAdapter())
+        assert bridge._risk_manager is None
+        # 10% of $100k at $150.
+        assert bridge._calculate_shares(150.0) == 66
+
+    def test_zero_size_from_risk_manager_is_a_rejection(self):
+        """A risk manager returning 0 must block the order, not fall back."""
+        rm = MagicMock()
+        rm.calculate_position_size.return_value = 0
+        bridge = _make_bridge(adapter=MockAdapter(), risk_manager=rm)
+        assert bridge._calculate_shares(150.0) == 0
+
+    def test_sizing_failure_fails_closed(self):
+        """An exception in sizing must not become a full-size default order."""
+        rm = MagicMock()
+        rm.calculate_position_size.side_effect = RuntimeError("boom")
+        bridge = _make_bridge(adapter=MockAdapter(), risk_manager=rm)
+        assert bridge._calculate_shares(150.0) == 0
+
+    def test_zero_shares_sends_no_order_to_the_broker(self):
+        rm = MagicMock()
+        rm.calculate_position_size.return_value = 0
+        adapter = MockAdapter()
+        bridge = _make_bridge(adapter=adapter, risk_manager=rm)
+
+        result = bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 150.0}, "AAPL",
+        )
+
+        assert result.success is False
+        assert adapter._orders == []
+
+
+# ── on_fill releases portfolio-gate exposure ──────────────────────────────
+
+class TestOnFillReleasesExposure:
+    """A TP/SL fill is the normal exit; it must reach the portfolio gate.
+
+    Without this the gate's exposure only ever grew, eventually blocking all
+    trading, and realized P&L never reached the daily-loss limit.
+    """
+
+    def test_exposure_is_released_on_fill(self):
+        adapter = MockAdapter()
+        bridge = _make_bridge(adapter=adapter)
+        bridge._positions["AAPL"] = Position("AAPL", "long", 100, 150.0, "t")
+        bridge._portfolio_gate.register_position("AAPL", 100, 150.0, "s", "mock")
+
+        before = bridge._portfolio_gate.get_portfolio_summary()["total_exposure"]
+        assert before > 0
+
+        bridge.on_fill("ORD-1", "AAPL", 160.0)
+
+        after = bridge._portfolio_gate.get_portfolio_summary()["total_exposure"]
+        assert after == pytest.approx(0.0)
+        assert "AAPL" not in bridge.get_positions()
+
+    def test_realized_pnl_reaches_the_gate(self):
+        adapter = MockAdapter()
+        bridge = _make_bridge(adapter=adapter)
+        bridge._positions["AAPL"] = Position("AAPL", "long", 100, 150.0, "t")
+        bridge._portfolio_gate.register_position("AAPL", 100, 150.0, "s", "mock")
+
+        bridge.on_fill("ORD-1", "AAPL", 140.0)
+
+        # $10/share loss on 100 shares, minus commissions on both legs.
+        daily = bridge._portfolio_gate.get_portfolio_summary()["daily_pnl"]
+        assert daily < -900.0
+        assert daily > -1100.0
+
+    def test_reconcile_releases_exposure_for_stale_positions(self):
+        adapter = MockAdapter()
+        adapter._positions = []  # broker reports flat
+        bridge = _make_bridge(adapter=adapter)
+        bridge._positions["AAPL"] = Position("AAPL", "long", 100, 150.0, "t")
+        bridge._portfolio_gate.register_position("AAPL", 100, 150.0, "s", "mock")
+
+        bridge.reconcile_positions()
+
+        assert bridge._portfolio_gate.get_portfolio_summary()["total_exposure"] == pytest.approx(0.0)

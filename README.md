@@ -5,7 +5,7 @@
 [![Scorecard](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/scorecard.yml/badge.svg)](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/scorecard.yml)
 [![Book](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/book-build.yml/badge.svg)](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/book-build.yml)
 
-A comprehensive algorithmic trading system with **15 strategies**, **7 data sources**, **7-layer risk management**, and full production safety controls. 288+ tests, thread-safe, crash-recoverable.
+A comprehensive algorithmic trading system with **15 strategies**, **7 data sources**, **7-layer risk management**, and production safety controls. 2,190+ tests passing on Python 3.12.
 
 ## Quick Start
 
@@ -72,7 +72,7 @@ stocks_plugin/
 │   ├── backtesting/              ← Multi-asset backtester with R-multiples/SQN
 │   └── ml/                       ← Sentiment, regime, ensemble, LSTM, RL
 ├── strategies/examples/          ← 15 registered strategies
-├── tests/                        ← 288+ tests (production safety + features)
+├── tests/                        ← 2,190+ tests (production safety + features)
 ├── setup_trading.py              ← One-command setup
 ├── paper_trader.py               ← Paper trading simulator (no broker needed)
 └── .github/workflows/ci.yml      ← CI/CD with security scan + release automation

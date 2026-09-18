@@ -215,15 +215,48 @@ class TestPositionCaps:
         ))
         assert rm.calculate_position_size("AAPL", 150.0) == 10000
 
-    def test_caps_never_return_zero_for_a_valid_request(self):
-        # A tiny account must still produce a tradeable size, not 0.
+    def test_returns_zero_when_one_share_breaches_the_cap(self):
+        """A $150 share cannot fit a 25% cap on a $100 account — refuse it.
+
+        The old behaviour floored every result at 1 share, which turned a
+        rejection into a 150%-of-equity position.
+        """
         rm = RiskManager(config=RiskManagerConfig(
             sizing_method=SizingMethod.FIXED_FRACTIONAL,
             risk_per_trade_pct=2.0,
             total_capital=100.0,
             max_position_pct_equity=25.0,
         ))
-        assert rm.calculate_position_size("AAPL", 150.0, stop_price=145.0) >= 1
+        assert rm.calculate_position_size("AAPL", 150.0, stop_price=145.0) == 0
+
+    def test_equity_cap_holds_for_high_priced_instruments(self):
+        """The cap must bind when it rounds down to zero whole shares.
+
+        Previously the cap was skipped entirely in that case, so a $30k
+        instrument on a $100k account returned 3 shares — $90k, 90% of equity,
+        against a documented 25% cap.
+        """
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_FRACTIONAL,
+            risk_per_trade_pct=2.0,
+            total_capital=100_000.0,
+            max_position_pct_equity=25.0,
+        ))
+        for price in (30_000.0, 60_000.0):
+            shares = rm.calculate_position_size("BRK.A", price, stop_price=price * 0.98)
+            assert shares * price <= 25_000.0, (
+                f"{shares} shares @ ${price} = ${shares * price} exceeds the 25% cap"
+            )
+
+    def test_notional_cap_holds_when_it_rounds_to_zero(self):
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_SHARES,
+            fixed_shares=10,
+            total_capital=10_000_000.0,
+            max_position_pct_equity=100.0,
+            max_position_notional=5_000.0,
+        ))
+        assert rm.calculate_position_size("BRK.A", 30_000.0) == 0
 
     def test_fixed_dollar_method(self):
         rm = RiskManager(config=RiskManagerConfig(
@@ -262,14 +295,29 @@ class TestPositionCaps:
         size = rm.calculate_position_size("AAPL", 0.0)
         assert size == 0
 
-    def test_minimum_one_share(self):
+    def test_unaffordable_share_is_refused_not_floored_to_one(self):
+        """A $500k share on a $1k account must return 0, not 1.
+
+        The old code floored every result at one share, so this returned 1 —
+        a $500,000 position on a $1,000 account, 500x equity.
+        """
         rm = RiskManager(config=RiskManagerConfig(
             sizing_method=SizingMethod.FIXED_FRACTIONAL,
             risk_per_trade_pct=0.01,  # very small risk
             total_capital=1000.0,
         ))
         size = rm.calculate_position_size("BRK.A", 500000.0, stop_price=499000.0)
-        assert size >= 1
+        assert size == 0
+
+    def test_one_share_allowed_when_it_fits_the_caps(self):
+        """The floor is only removed where it was unsafe — 1 share still works."""
+        rm = RiskManager(config=RiskManagerConfig(
+            sizing_method=SizingMethod.FIXED_FRACTIONAL,
+            risk_per_trade_pct=0.01,
+            total_capital=100_000.0,
+            max_position_pct_equity=25.0,
+        ))
+        assert rm.calculate_position_size("AAPL", 150.0, stop_price=145.0) >= 1
 
 
 # ─── can_trade() Tests ───
@@ -409,6 +457,24 @@ class TestPortfolioHeat:
         custom_rm.add_position("A", 5000)
         # Adding 5001 more → total 10001 → 10.001% > 10% → rejected
         assert custom_rm.check_portfolio_heat(additional_risk=5001.0) is False
+
+    def test_short_risk_does_not_cancel_long_risk(self, custom_rm):
+        """Shorts are stored negative; heat must sum magnitudes, not net.
+
+        A market-neutral book still has both legs at risk simultaneously, so
+        netting them reported 0% heat and waved through every later position.
+        """
+        custom_rm.add_position("LONG1", 5000.0)
+        custom_rm.add_position("SHORT1", -5000.0)
+
+        # Gross heat is $10k = 10% of $100k equity, already at the limit.
+        assert custom_rm.get_status()["portfolio_heat_pct"] == pytest.approx(10.0)
+        assert custom_rm.check_portfolio_heat(additional_risk=1.0) is False
+
+    def test_additional_short_risk_counted_as_exposure(self, custom_rm):
+        """A proposed short adds heat; it must not subtract from it."""
+        custom_rm.add_position("LONG1", 9000.0)
+        assert custom_rm.check_portfolio_heat(additional_risk=-5000.0) is False
 
 
 # ─── Position Tracking Tests ───

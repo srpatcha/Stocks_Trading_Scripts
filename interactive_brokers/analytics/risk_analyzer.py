@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_STANDARD_NORMAL = NormalDist()
 
 
 @dataclass
@@ -131,20 +134,19 @@ class RiskAnalyzer:
             cvar_pct = -tail.mean() if len(tail) > 0 else var_pct
 
         elif method == "parametric":
-            try:
-                from scipy.stats import norm
-            except ImportError:
-                raise ImportError(
-                    "scipy is required for parametric VaR. "
-                    "Install with: pip install scipy"
-                )
+            # statistics.NormalDist replaces scipy.stats.norm here. scipy is an
+            # optional dependency that CI does not install, so this branch used
+            # to raise ImportError in a default environment. The stdlib gives
+            # the same values to full double precision with no dependency.
             mu = returns.mean()
             sigma = returns.std()
-            z_score = norm.ppf(1 - confidence)
+            z_score = _STANDARD_NORMAL.inv_cdf(1 - confidence)
             var_pct = -(mu + z_score * sigma)
 
             # Parametric CVaR
-            cvar_pct = -(mu - sigma * norm.pdf(norm.ppf(1 - confidence)) / (1 - confidence))
+            cvar_pct = -(
+                mu - sigma * _STANDARD_NORMAL.pdf(z_score) / (1 - confidence)
+            )
         else:
             raise ValueError(f"Unknown VaR method: {method}")
 

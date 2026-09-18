@@ -351,27 +351,40 @@ class RiskManager:
         - Max position as % of equity
         - Max notional dollar cap
         - Max shares per order (fat-finger)
+
+        Returns 0 when no whole share fits inside the caps. Callers must treat
+        0 as "do not trade" rather than assuming a minimum of one share: for an
+        instrument priced above the cap, one share already breaches it. This
+        previously skipped the cap whenever it rounded down to zero and then
+        floored the result at 1, so a $30,000 stock on a $100k account with a
+        25% cap returned 3 shares — $90,000, or 90% of equity.
         """
         if entry_price <= 0 or shares <= 0:
-            return shares
+            return 0
 
         # Cap: max % of equity
         max_by_equity = int(
             self._current_equity * (self.config.max_position_pct_equity / 100.0) / entry_price
         )
-        if max_by_equity > 0:
-            shares = min(shares, max_by_equity)
+        shares = min(shares, max_by_equity)
 
         # Cap: max notional dollars
         if self.config.max_position_notional > 0:
             max_by_notional = int(self.config.max_position_notional / entry_price)
-            if max_by_notional > 0:
-                shares = min(shares, max_by_notional)
+            shares = min(shares, max_by_notional)
 
         # Cap: max shares per order (fat-finger)
         shares = min(shares, self.config.max_shares_per_order)
 
-        return max(1, shares)
+        if shares <= 0:
+            logger.warning(
+                "Position rejected: no whole share of a $%.2f instrument fits within "
+                "the position caps (%.1f%% of $%.2f equity)",
+                entry_price, self.config.max_position_pct_equity, self._current_equity,
+            )
+            return 0
+
+        return shares
 
     def _fixed_fractional_size(
         self,
@@ -501,14 +514,21 @@ class RiskManager:
     def check_portfolio_heat(self, additional_risk: float = 0.0) -> bool:
         """Check if adding a new position would exceed portfolio heat limit.
 
+        Heat is the *gross* dollar risk at stake. Short positions are stored in
+        ``_open_positions`` as negative amounts (see ``validate_order``, which
+        counts negative values as shorts), so summing them signed let a short
+        cancel out a long: a book of $15k long risk and $15k short risk
+        reported 0% heat and approved every further position. Risk does not
+        net — both legs can lose at once — so magnitudes are summed.
+
         Args:
             additional_risk: Dollar risk of the proposed new position.
 
         Returns:
             True if within limits.
         """
-        current_heat = sum(self._open_positions.values())
-        total_heat = current_heat + additional_risk
+        current_heat = sum(abs(v) for v in self._open_positions.values())
+        total_heat = current_heat + abs(additional_risk)
         heat_pct = (total_heat / self._current_equity) * 100 if self._current_equity > 0 else 100
 
         if heat_pct > self.config.max_portfolio_heat_pct:
@@ -684,7 +704,9 @@ class RiskManager:
             if self._peak_equity > 0
             else 0
         )
-        total_heat = sum(self._open_positions.values())
+        # Gross, matching check_portfolio_heat — see the note there on why
+        # short and long risk must not net against each other.
+        total_heat = sum(abs(v) for v in self._open_positions.values())
         heat_pct = (total_heat / self._current_equity) * 100 if self._current_equity > 0 else 0
 
         recent_trades_1h = len([t for t in self._trade_timestamps if t > now - 3600])

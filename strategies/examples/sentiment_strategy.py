@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -35,6 +35,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from shared.indicators.technical_indicators import TechnicalIndicators as TI
 from strategies import register_strategy
+
+if TYPE_CHECKING:  # pragma: no cover
+    # Imported at runtime inside generate_signals to avoid a circular
+    # import; declared here so the annotation resolves for linters and
+    # type checkers instead of tripping F821.
+    from shared.backtesting.backtest_engine_v2 import BacktestContext
+
 
 logger = logging.getLogger(__name__)
 

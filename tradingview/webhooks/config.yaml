@@ -5,7 +5,14 @@ server:
   host: "0.0.0.0"
   port: 5000
   debug: false
-  workers: 4
+  # Must stay 1. The replay-dedup cache, the rate limiter, the daily-P&L
+  # tracker, the loss-streak cooldown, the drawdown breaker and the position
+  # ledger are all in-process. With 4 workers each process gets its own copy:
+  # a replayed alert lands on a worker that has not seen it and places a
+  # duplicate order, the effective rate limit becomes 4x, and every risk limit
+  # is multiplied by the worker count. Raise this only once that state is
+  # moved to shared storage (e.g. Redis).
+  workers: 1
   title: "TradingView Webhook Server"
   version: "1.0.0"
 

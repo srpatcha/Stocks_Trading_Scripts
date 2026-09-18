@@ -435,13 +435,16 @@ class TestStopOrders:
                 return 100.0
 
         adapter = MinimalAdapter()
-        import logging
         with patch("shared.daemon.broker_bridge.logger") as mock_log:
             result = adapter.place_stop_order("AAPL", "SELL", 100, 95.0)
-            assert result.success
-            mock_log.warning.assert_called()
-            warn_msg = mock_log.warning.call_args[0][0]
-            assert "place_stop_order" in warn_msg
+            # An adapter with no stop support must fail closed. Substituting a
+            # limit order at the stop price would be immediately marketable and
+            # would close the position the stop exists to protect.
+            assert result.success is False
+            assert "no protective order" in result.message
+            mock_log.error.assert_called()
+            err_msg = mock_log.error.call_args[0][0]
+            assert "place_stop_order" in err_msg
 
 
 # ═══════════════════════════════════════════════════════════════════════════

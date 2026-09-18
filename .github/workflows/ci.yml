@@ -75,8 +75,11 @@ jobs:
       - name: Run graph memory tests
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest tests/test_graph_memory.py -v --tb=short || true
+        run: python -m pytest tests/test_graph_memory.py -v --tb=short
 
+      # This step used to end in `|| true`, which also nullified
+      # --cov-fail-under. The full suite could not fail the build, and a real
+      # money-safety test had been failing unnoticed as a result.
       - name: Run full test suite with coverage
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -84,14 +87,18 @@ jobs:
           python -m pytest tests/ -v --tb=short \
             --ignore=tests/test_backtest_engine_v2.py \
             -m "not slow and not ml" \
-            --cov=shared --cov=strategies --cov-report=term-missing \
-            --cov-fail-under=50 || true
+            --cov=shared --cov=strategies \
+            --cov=interactive_brokers --cov=tradingview \
+            --cov=tradestation --cov=thinkorswim \
+            --cov-report=term-missing \
+            --cov-fail-under=50
 
   # ─── Security Scan ─────────────────────────────────────────────────────────
   security:
     name: Security Scan
     runs-on: ubuntu-latest
-    continue-on-error: true
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -102,27 +109,52 @@ jobs:
 
       - name: Install security tools
         run: |
-          pip install bandit safety
+          pip install bandit pip-audit
 
+      # Scope widened past shared/ and strategies/ — the broker clients and the
+      # internet-facing webhook server were never scanned.
       - name: Run Bandit security scan
         run: |
-          bandit -r shared/ strategies/ -ll --skip B101,B603,B607 -f txt || true
+          bandit -r shared/ strategies/ interactive_brokers/ tradingview/ \
+                 tradestation/ thinkorswim/ \
+                 -ll --skip B101,B603,B607 -f txt
 
+      # The old version was `! grep ... || echo "...✅"`, which prints any
+      # secret it finds and then exits 0. Verified: it could never fail.
       - name: Check for hardcoded secrets
         run: |
           echo "Scanning for potential secrets..."
-          ! grep -rn "password\s*=\s*['\"]" shared/ strategies/ --include="*.py" | grep -v "test_" | grep -v "#" | grep -v '""' | grep -v "''" || echo "No hardcoded secrets found ✅"
+          if grep -rIn --include="*.py" -E "(password|api_key|secret|token)\s*=\s*['\"][^'\"]+['\"]" \
+               shared/ strategies/ interactive_brokers/ tradingview/ \
+               tradestation/ thinkorswim/ \
+             | grep -v "test_" \
+             | grep -vE "os\.(getenv|environ)" \
+             | grep -vE "(CHANGE_ME|<INSERT|example|placeholder|YOUR_|\.\.\.)"; then
+            echo "::error::Possible hardcoded secret found"
+            exit 1
+          fi
+          echo "No hardcoded secrets found"
 
       - name: Check for unsafe eval/exec
         run: |
           echo "Scanning for eval/exec..."
-          ! grep -rn "\beval\b\|exec(" shared/ strategies/ --include="*.py" | grep -v "model.eval()" | grep -v "#" || echo "No unsafe eval/exec found ✅"
+          if grep -rIn --include="*.py" -E "(^|[^.\w])(eval|exec)\(" \
+               shared/ strategies/ interactive_brokers/ tradingview/ \
+               tradestation/ thinkorswim/; then
+            echo "::error::Unsafe eval/exec found"
+            exit 1
+          fi
+          echo "No unsafe eval/exec found"
+
+      - name: Audit dependencies for known CVEs
+        run: pip-audit --requirement requirements.txt --strict || true
 
   # ─── Lint ───────────────────────────────────────────────────────────────────
   lint:
     name: Code Quality
     runs-on: ubuntu-latest
-    continue-on-error: true
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -134,22 +166,20 @@ jobs:
       - name: Install linters
         run: pip install flake8 pycodestyle
 
+      # Was a hand-maintained list of ten files. Compile everything that is
+      # tracked, minus the vendored trees, so a new file cannot slip past.
       - name: Syntax check all Python files
         run: |
-          python -m py_compile shared/risk_manager.py
-          python -m py_compile shared/strategy_enricher.py
-          python -m py_compile shared/trade_journal.py
-          python -m py_compile shared/data/public_data_fetcher.py
-          python -m py_compile shared/indicators/technical_indicators.py
-          python -m py_compile shared/indicators/candlestick_patterns.py
-          python -m py_compile shared/backtesting/backtest_engine_v2.py
-          for f in strategies/examples/*.py; do python -m py_compile "$f"; done
-          python -m py_compile setup_trading.py
-          python -m py_compile paper_trader.py
+          git ls-files '*.py' \
+            | grep -v '^ghostfolio/' \
+            | xargs -r python -m py_compile
           echo "All files compile ✅"
 
       - name: Flake8 (errors only)
-        run: flake8 shared/ strategies/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        run: |
+          flake8 shared/ strategies/ interactive_brokers/ tradingview/ \
+                 tradestation/ thinkorswim/ \
+                 --count --select=E9,F63,F7,F82 --show-source --statistics
 
   # ─── Strategy Validation ───────────────────────────────────────────────────
   validate-strategies:

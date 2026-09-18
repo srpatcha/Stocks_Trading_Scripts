@@ -431,6 +431,8 @@ class TestWebhookPayloads:
         assert p.strategy == "chameleon_regime_switcher"
 
     def test_minimal_required_fields_only(self):
-        p = AlertPayload(symbol="QQQ", action="close", price=0.0)
-        assert p.price == 0.0
+        # price must be > 0; a zero price bypassed the notional cap.
+        p = AlertPayload(symbol="QQQ", action="close", price=350.0)
+        assert p.price == 350.0
         assert p.order_type == "market"
+        assert p.quantity is None

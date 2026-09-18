@@ -20,11 +20,16 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from pydantic import ValidationError
+
 from tradingview.webhooks.webhook_server import (
+    MAX_ORDER_QUANTITY,
+    _update_risk_controls,
     HealthMonitor,
     DailyPnLTracker,
     CooldownManager,
     DrawdownCircuitBreaker,
+    PositionLedger,
     RateLimiter,
     HealthResponse,
     AlertPayload,
@@ -351,14 +356,26 @@ class TestMaxTradeValueCap:
             alert.quantity = capped_qty
         assert alert.quantity == pytest.approx(333.33, abs=0.1)
 
-    def test_cap_with_zero_price(self):
-        alert = AlertPayload(
-            symbol="PENNY", action="buy", price=0.0, quantity=1000.0,
-        )
-        max_cap = 50_000.0
-        trade_value = alert.quantity * alert.price  # 0
-        # No capping needed when trade value is 0
-        assert trade_value <= max_cap
+    def test_zero_price_is_rejected_at_the_schema(self):
+        """price=0 must not be accepted — it defeated the notional cap.
+
+        The cap is computed as quantity * price, so a zero price made every
+        order look like a $0 trade: the dollar limit never bound, and the
+        limit-order conversion was skipped so it stayed a market order.
+        """
+        with pytest.raises(ValidationError):
+            AlertPayload(symbol="PENNY", action="buy", price=0.0, quantity=1000.0)
+
+    def test_negative_price_is_rejected(self):
+        with pytest.raises(ValidationError):
+            AlertPayload(symbol="PENNY", action="buy", price=-1.0, quantity=10.0)
+
+    def test_quantity_has_an_upper_bound(self):
+        with pytest.raises(ValidationError):
+            AlertPayload(
+                symbol="AAPL", action="buy", price=150.0,
+                quantity=MAX_ORDER_QUANTITY + 1,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -459,3 +476,172 @@ class TestIntegrationAllControls:
         assert len(errors) == 0
         assert tracker.trade_count == 500
         assert tracker.daily_pnl == -500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  PositionLedger — realized P&L for the risk controls
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPositionLedger:
+    """The ledger is what makes the three risk controls able to fire.
+
+    Before it existed the server fed them pnl=0.0 and won=True on every order,
+    so the daily-loss limit, the loss-streak cooldown and the drawdown breaker
+    were all mathematically unable to trip.
+    """
+
+    def test_long_round_trip_profit(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", 100, 150.0)
+        assert ledger.record_close("AAPL", 100, 160.0) == pytest.approx(1000.0)
+
+    def test_long_round_trip_loss(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", 100, 150.0)
+        assert ledger.record_close("AAPL", 100, 140.0) == pytest.approx(-1000.0)
+
+    def test_short_round_trip_profit(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", -100, 150.0)
+        assert ledger.record_close("AAPL", 100, 140.0) == pytest.approx(1000.0)
+
+    def test_short_round_trip_loss(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", -100, 150.0)
+        assert ledger.record_close("AAPL", 100, 160.0) == pytest.approx(-1000.0)
+
+    def test_average_cost_across_adds(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", 100, 100.0)
+        ledger.record_open("AAPL", 100, 200.0)
+        # Average cost 150; closing all 200 at 150 is flat.
+        assert ledger.record_close("AAPL", 200, 150.0) == pytest.approx(0.0)
+
+    def test_partial_close_leaves_remainder_open(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", 100, 150.0)
+        assert ledger.record_close("AAPL", 40, 160.0) == pytest.approx(400.0)
+        assert ledger.get_open_symbols() == ["AAPL"]
+        assert ledger.record_close("AAPL", 60, 160.0) == pytest.approx(600.0)
+        assert ledger.get_open_symbols() == []
+
+    def test_close_without_entry_returns_none(self):
+        """Unknown outcome must be reported as unknown, not as zero."""
+        ledger = PositionLedger()
+        assert ledger.record_close("AAPL", 100, 150.0) is None
+
+    def test_oversized_close_is_clamped_to_holding(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", 100, 150.0)
+        assert ledger.record_close("AAPL", 500, 160.0) == pytest.approx(1000.0)
+        assert ledger.get_open_symbols() == []
+
+    def test_position_is_fully_removed_when_flat(self):
+        ledger = PositionLedger()
+        ledger.record_open("AAPL", 100, 150.0)
+        ledger.record_close("AAPL", 100, 150.0)
+        assert ledger.get_open_symbols() == []
+
+    def test_concurrent_open_and_close_is_consistent(self):
+        ledger = PositionLedger()
+        errors = []
+
+        def cycle():
+            try:
+                for _ in range(100):
+                    ledger.record_open("AAPL", 1, 100.0)
+                    ledger.record_close("AAPL", 1, 100.0)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=cycle) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+
+
+class TestRiskControlsReceiveRealOutcomes:
+    """_update_risk_controls must feed outcomes, not constants."""
+
+    def _make_app(self, max_daily_loss=5000.0, max_consecutive_losses=3):
+        app = MagicMock()
+        app.state.position_ledger = PositionLedger()
+        app.state.pnl_tracker = DailyPnLTracker(max_daily_loss=max_daily_loss)
+        app.state.cooldown_mgr = CooldownManager(
+            max_consecutive_losses=max_consecutive_losses)
+        app.state.drawdown_breaker = DrawdownCircuitBreaker(max_drawdown_pct=10.0)
+        app.state.starting_equity = 100_000.0
+        app.state.realized_pnl_total = 0.0
+        app.state.drawdown_breaker.update_equity(100_000.0)
+        return app
+
+    def _alert(self, action, price, quantity=100.0, strategy="s1"):
+        return AlertPayload(
+            symbol="AAPL", action=action, price=price,
+            quantity=quantity, strategy=strategy,
+        )
+
+    def test_open_alone_does_not_move_pnl(self):
+        app = self._make_app()
+        _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+        assert app.state.pnl_tracker.daily_pnl == 0.0
+
+    def test_losing_round_trip_moves_daily_pnl(self):
+        app = self._make_app()
+        _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+        _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        assert app.state.pnl_tracker.daily_pnl == pytest.approx(-1000.0)
+
+    def test_daily_loss_limit_actually_trips(self):
+        """The whole point: enough losses must block further trading."""
+        app = self._make_app(max_daily_loss=2500.0)
+        for _ in range(3):
+            _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+            _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        assert app.state.pnl_tracker.daily_pnl == pytest.approx(-3000.0)
+        assert app.state.pnl_tracker.can_trade() is False
+
+    def test_consecutive_losses_trigger_cooldown(self):
+        app = self._make_app(max_consecutive_losses=3)
+        for _ in range(3):
+            _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+            _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        assert app.state.cooldown_mgr.is_in_cooldown("s1") is True
+
+    def test_a_win_resets_the_loss_streak(self):
+        app = self._make_app(max_consecutive_losses=3)
+        for _ in range(2):
+            _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+            _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+        _update_risk_controls(app, self._alert("sell", 160.0), 100.0)
+        _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+        _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        assert app.state.cooldown_mgr.is_in_cooldown("s1") is False
+
+    def test_drawdown_breaker_trips_on_real_losses(self):
+        app = self._make_app(max_daily_loss=1_000_000.0)
+        # 11 x $1,000 loss on $100k starting equity = 11% drawdown > 10%.
+        for _ in range(11):
+            _update_risk_controls(app, self._alert("buy", 150.0), 100.0)
+            _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        assert app.state.drawdown_breaker.can_trade() is False
+
+    def test_close_without_entry_does_not_fabricate_pnl(self):
+        app = self._make_app()
+        _update_risk_controls(app, self._alert("sell", 140.0), 100.0)
+        assert app.state.pnl_tracker.daily_pnl == 0.0
+        assert app.state.cooldown_mgr.is_in_cooldown("s1") is False
+
+    def test_broker_equity_is_preferred_over_the_synthetic_series(self):
+        app = self._make_app()
+        broker = MagicMock()
+        broker.get_account_info.return_value = {"net_liquidation": 80_000.0}
+        _update_risk_controls(app, self._alert("buy", 150.0), 100.0, broker)
+        _update_risk_controls(app, self._alert("sell", 140.0), 100.0, broker)
+        # 80k against a 100k peak is a 20% drawdown — breaker must trip.
+        assert app.state.drawdown_breaker.can_trade() is False

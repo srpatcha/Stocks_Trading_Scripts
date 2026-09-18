@@ -6,6 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "stocks_plugin"
 version = "0.1.0"
 requires-python = ">=3.9"
+# AGPL-3.0 because the repository vendors AGPL-3.0 (ghostfolio) and GPL-3.0
+# (alpaca-trend-alert) code in-tree. See NOTICE.md.
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 
 # Package discovery must be explicit. This is a flat layout with twelve
 # top-level directories, so setuptools' automatic discovery refuses to guess:
@@ -43,7 +47,17 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["shared", "strategies"]
+# The broker clients and the internet-facing webhook server were absent from
+# this list, so ~13k lines — including every line that can place a real order —
+# contributed nothing to the coverage gate.
+source = [
+    "shared",
+    "strategies",
+    "interactive_brokers",
+    "tradingview",
+    "tradestation",
+    "thinkorswim",
+]
 omit = [
     "tests/*",
     "*/__pycache__/*",
@@ -53,10 +67,15 @@ omit = [
 [tool.coverage.report]
 show_missing = true
 fail_under = 60
+# These are regexes matched with re.search against the line text, not
+# statement types. A bare "pass" therefore also matched any line containing
+# "password" — it was excluding server.login(smtp_user, smtp_password) in
+# alert_dispatcher.py from coverage. "except ImportError" excluded 50 optional
+# dependency fallbacks, the paths most likely to silently degrade. Both are
+# anchored now.
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.",
-    "raise NotImplementedError",
-    "pass",
-    "except ImportError",
+    "^\\s*raise NotImplementedError",
+    "^\\s*pass\\s*$",
 ]

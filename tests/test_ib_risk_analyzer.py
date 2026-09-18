@@ -113,11 +113,27 @@ class TestCalculateVarParametric:
         result = analyzer.calculate_var(daily_returns, method="parametric")
         assert result.cvar_dollar > 0
 
-    def test_var_parametric_scipy_import(self, analyzer, daily_returns):
-        """Verify fix: scipy wrapped in try/except — ImportError raised cleanly."""
+    def test_var_parametric_needs_no_scipy(self, analyzer, daily_returns):
+        """Parametric VaR must work without scipy installed.
+
+        scipy is an optional dependency that CI does not install, so this
+        branch used to raise ImportError in a default environment. It now uses
+        statistics.NormalDist from the standard library.
+        """
         with patch.dict("sys.modules", {"scipy": None, "scipy.stats": None}):
-            with pytest.raises(ImportError, match="scipy is required"):
-                analyzer.calculate_var(daily_returns, method="parametric")
+            result = analyzer.calculate_var(daily_returns, method="parametric")
+        assert result.var_dollar > 0
+        assert result.method == "parametric"
+
+    def test_var_parametric_matches_known_z_score(self, analyzer):
+        """At 95% the z-score is -1.6449; check the arithmetic, not just >0."""
+        import pandas as pd
+
+        # Zero-mean series with a known standard deviation.
+        returns = pd.Series([-0.01, 0.01] * 50)
+        result = analyzer.calculate_var(returns, confidence=0.95, method="parametric")
+        sigma = float(returns.std())
+        assert result.var_pct == pytest.approx(1.6448536 * sigma, rel=1e-4)
 
     def test_var_unknown_method(self, analyzer, daily_returns):
         with pytest.raises(ValueError, match="Unknown VaR method"):

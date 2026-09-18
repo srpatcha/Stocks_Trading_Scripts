@@ -313,10 +313,35 @@ class TestRiskManagerIntegration:
         rm.can_trade.return_value = True
         router = _make_router(risk_manager=rm)
         router._pre_order_checks("AAPL")  # should not raise
+        rm.can_trade.assert_called()
 
-    def test_risk_manager_error_allows_trade(self):
+    def test_risk_manager_error_blocks_trade(self):
+        """A gate that errors has an unknown answer — that is not "yes".
+
+        This used to log a warning and let the order through. Signature drift
+        between a caller and RiskManager has already happened elsewhere in this
+        codebase, so the branch is reachable in practice.
+        """
         rm = MagicMock()
         rm.can_trade.side_effect = Exception("RM unavailable")
         router = _make_router(risk_manager=rm)
-        # Should not raise — falls through to local checks
-        router._pre_order_checks("AAPL")
+        with pytest.raises(TradingBlockedError, match="RiskManager check errored"):
+            router._pre_order_checks("AAPL")
+
+    def test_local_daily_loss_limit_applies_even_with_a_risk_manager(self):
+        """Attaching a RiskManager must not disable the router's own stop.
+
+        can_trade() returned the RiskManager's verdict directly, skipping the
+        local check. Since record_trade_pnl only updates the local counter,
+        attaching the "better" risk manager made the router strictly less safe:
+        a $6,000 local loss against a $5,000 limit still returned True.
+        """
+        rm = MagicMock()
+        rm.can_trade.return_value = True
+        router = _make_router(risk_manager=rm)
+        router._max_daily_loss = 5000.0
+        router.record_trade_pnl(-6000.0)
+
+        assert router.can_trade() is False
+        with pytest.raises(TradingBlockedError, match="daily loss limit"):
+            router._pre_order_checks("AAPL")

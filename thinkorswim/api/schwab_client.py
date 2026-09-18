@@ -43,6 +43,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+from shared.utils.secret_file import write_secret_file
+
 # --- RiskManager integration (optional, from shared module) ---
 try:
     from shared.risk_manager import RiskManager, RiskManagerConfig
@@ -249,8 +251,7 @@ class SchwabClient:
         """Persist the current refresh token to disk."""
         try:
             token_path = Path.home() / ".stocks_plugin" / "schwab_refresh_token.txt"
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_path.write_text(self._refresh_token, encoding="utf-8")
+            write_secret_file(token_path, self._refresh_token)
             logger.debug("Schwab refresh token persisted to %s", token_path)
         except Exception as e:
             logger.warning("Failed to persist Schwab refresh token: %s", e)
@@ -392,18 +393,23 @@ class SchwabClient:
 
     # ─── Orders ───
 
-    def _submit_order(self, order_body: Dict[str, Any]) -> str:
+    def _submit_order(self, order_body: Dict[str, Any], account_id: str = None) -> str:
         """Submit an order and extract the order ID from the Location header.
 
         The Schwab API returns 201 with the order ID in the Location header,
         not in the response body.
+
+        Args:
+            order_body: Schwab order payload.
+            account_id: Target account. Defaults to the client's own account.
 
         Returns:
             Order ID string.
         """
         self._rate_limit()
         headers = self._headers()
-        url = f"{self.TRADER_URL}/accounts/{self._account_id}/orders"
+        acct = account_id or self._account_id
+        url = f"{self.TRADER_URL}/accounts/{acct}/orders"
 
         try:
             resp = self._session.post(url, headers=headers, json=order_body, timeout=30)
@@ -535,7 +541,10 @@ class SchwabClient:
                 "instrument": {"symbol": symbol, "assetType": "EQUITY"}
             }]
         }
-        return self._submit_order(acct, order_body)
+        logger.info("Schwab: placing stop %s %d %s @ $%.2f", action, quantity, symbol, order_body["stopPrice"])
+        order_id = self._submit_order(order_body, account_id=acct)
+        logger.info("Schwab stop order placed: %s", order_id)
+        return order_id
 
     def cancel_order(self, order_id: str) -> None:
         """Cancel an order."""
@@ -632,12 +641,12 @@ class SchwabClient:
         )
 
         if self._risk_manager is not None:
+            # RiskManager.record_trade takes (symbol, pnl) only. Passing
+            # quantity= raised TypeError on every call, and the except below
+            # downgraded it to a warning — so the shared risk state (daily
+            # P&L, loss streak, cooldown, equity) never moved.
             try:
-                self._risk_manager.record_trade(
-                    symbol=symbol,
-                    pnl=pnl,
-                    quantity=quantity,
-                )
+                self._risk_manager.record_trade(symbol=symbol, pnl=pnl)
             except Exception as e:
                 logger.warning("RiskManager.record_trade failed: %s", e)
 

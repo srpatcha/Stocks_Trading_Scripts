@@ -14,6 +14,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+from shared.utils.secret_file import write_secret_file
+
 try:
     from shared.risk_manager import RiskManager  # type: ignore
 except ImportError:
@@ -230,7 +232,14 @@ class TradeStationOrderRouter:
             except Exception as exc:
                 if isinstance(exc, TradingBlockedError):
                     raise
-                logger.warning("RiskManager check failed, allowing trade: %s", exc)
+                # Fail closed. A risk gate that errors is a gate whose answer
+                # is unknown, and "unknown" must not mean "yes" on an order
+                # path. Signature drift between this caller and RiskManager has
+                # already happened elsewhere in this codebase, so this branch
+                # is reachable in practice, not theoretical.
+                msg = f"Order rejected — RiskManager check errored: {exc}"
+                logger.error(msg)
+                raise TradingBlockedError(msg) from exc
 
         if not self.can_trade():
             msg = (
@@ -267,14 +276,28 @@ class TradeStationOrderRouter:
         self._save_risk_state()
 
     def can_trade(self) -> bool:
-        """Return False when cumulative daily losses exceed the limit."""
+        """Return False when cumulative daily losses exceed the limit.
+
+        Both limits apply. Returning the shared RiskManager's verdict directly
+        skipped the local check entirely, and since ``record_trade_pnl`` only
+        updates the local ``_daily_pnl``, attaching a RiskManager disabled this
+        router's own daily stop: a $6,000 local loss against a $5,000 limit
+        still returned True. Attaching the better risk manager made the system
+        strictly less safe.
+        """
         self._auto_reset_daily()
+        local_ok = self._daily_pnl > -self._max_daily_loss
+        if not local_ok:
+            return False
+
         if self._risk_manager is not None:
             try:
-                return self._risk_manager.can_trade()
+                return bool(self._risk_manager.can_trade())
             except Exception as exc:
-                logger.warning("RiskManager.can_trade() failed, falling back to local check: %s", exc)
-        return self._daily_pnl > -self._max_daily_loss
+                # Fail closed — see _pre_order_checks.
+                logger.error("RiskManager.can_trade() failed, blocking trade: %s", exc)
+                return False
+        return True
 
     def reset_daily(self) -> None:
         """Reset the daily P&L counter (call at start of trading day)."""
@@ -379,8 +402,7 @@ class TradeStationOrderRouter:
         """Persist the current refresh token to disk."""
         try:
             token_path = Path.home() / ".stocks_plugin" / "ts_refresh_token.txt"
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_path.write_text(self.refresh_token, encoding="utf-8")
+            write_secret_file(token_path, self.refresh_token)
             logger.debug("TradeStation refresh token persisted to %s", token_path)
         except Exception as e:
             logger.warning("Failed to persist TradeStation refresh token: %s", e)
@@ -616,7 +638,10 @@ class TradeStationOrderRouter:
             "TimeInForce": {"Duration": "DAY"},
             "Route": "Intelligent"
         }
-        result = self._request("POST", f"/v3/orderexecution/orders", json=body)
+        # BASE_URL already ends in /v3, and _request's payload parameter is
+        # json_body — "/v3/..." plus json= produced a doubled path and a
+        # TypeError on every stop-order placement.
+        result = self._request("POST", "/orderexecution/orders", json_body=body)
         orders = result.get("Orders", [])
         return orders[0]["OrderID"] if orders else None
 

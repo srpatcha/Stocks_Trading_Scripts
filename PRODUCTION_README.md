@@ -288,4 +288,6 @@ A: No — `paper_trader.py` works with free Yahoo Finance data, no broker needed
 A: The system has circuit breakers and stale cache fallback. It stops trading, never crashes.
 
 **Q: Is my money safe from bugs?**
-A: 7 independent safety layers protect you. All 288 tests pass. But always start with paper trading.
+A: 7 independent safety layers protect you, and the full suite passes. Note that the layers in
+`shared/risk_manager.py` apply only where a RiskManager is attached — pass one to
+`BrokerBridge(risk_manager=...)` or `LiveRunner(risk_manager=...)`. Always start with paper trading.

@@ -542,13 +542,21 @@ class TestRiskManagerCannotBeBypassed:
         assert body["reason"] == "daily_loss_limit"
 
     def test_concurrent_orders_respect_max_positions(self, risk_manager: RiskManager):
-        """Simultaneous orders can't exceed max positions (10)."""
+        """Simultaneous orders can't exceed max positions (10).
+
+        can_trade() and add_position() are two operations, so concurrent
+        callers can all see can_trade() as True before any of them takes a
+        slot. add_position() re-checks the ceiling inside its lock and returns
+        False when the account is full — the caller must honour that return
+        value. Treating can_trade() alone as permission admitted 15 positions
+        against a limit of 10.
+        """
         results = []
 
         def try_trade(idx):
             if risk_manager.can_trade():
-                risk_manager.add_position(f"SYM{idx}", 500.0)
-                results.append(True)
+                granted = risk_manager.add_position(f"SYM{idx}", 500.0)
+                results.append(granted)
             else:
                 results.append(False)
 
@@ -563,6 +571,9 @@ class TestRiskManagerCannotBeBypassed:
 
         success_count = sum(1 for r in results if r is True)
         assert success_count <= 10, f"Accepted {success_count} positions, max is 10"
+        # The ceiling must actually be reached, not under-filled by the race.
+        assert success_count == 10
+        assert risk_manager.get_status()["open_positions"] == 10
 
 
 # ════════════════════════════════════════════════════════════════════════════

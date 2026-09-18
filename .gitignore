@@ -40,3 +40,8 @@ htmlcov/
 /data/
 *.csv
 !shared/data/
+
+# Test artifacts — the suite writes these into the working tree
+/graph_memory.json
+*.db-wal
+*.db-shm

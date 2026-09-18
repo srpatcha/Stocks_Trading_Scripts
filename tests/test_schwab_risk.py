@@ -185,12 +185,28 @@ class TestDailyReset:
 class TestRecordTradePnl:
 
     def test_forwards_to_risk_manager(self):
-        rm = MagicMock()
+        # spec= binds the mock to the real RiskManager signature. An unspecced
+        # MagicMock accepts any keyword, which is how a call passing
+        # quantity= — rejected by the real record_trade(symbol, pnl) — passed
+        # this test while silently failing in production.
+        from shared.risk_manager import RiskManager
+
+        rm = MagicMock(spec=RiskManager)
         client = _make_client(risk_manager=rm)
         client.record_trade_pnl("AAPL", -200.0, quantity=50)
-        rm.record_trade.assert_called_once_with(
-            symbol="AAPL", pnl=-200.0, quantity=50,
-        )
+        rm.record_trade.assert_called_once_with(symbol="AAPL", pnl=-200.0)
+
+    def test_forwarded_call_matches_real_risk_manager(self):
+        """The forwarded call must be accepted by the real RiskManager."""
+        from shared.risk_manager import RiskManager, RiskManagerConfig
+
+        rm = RiskManager(RiskManagerConfig(total_capital=100_000.0))
+        client = _make_client(risk_manager=rm)
+        client.record_trade_pnl("AAPL", -200.0, quantity=50)
+
+        # record_trade swallows nothing here: if the signature drifts again the
+        # daily P&L simply will not move.
+        assert rm.get_status()["daily_pnl"] == pytest.approx(-200.0)
 
     def test_risk_manager_error_handled_gracefully(self):
         rm = MagicMock()
