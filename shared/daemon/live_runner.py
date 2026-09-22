@@ -822,7 +822,16 @@ class LiveRunner:
                 logger.error("Failed to flatten broker positions: %s", e)
 
     def _shutdown(self) -> None:
-        """Graceful shutdown: flatten positions, save state, report."""
+        """Graceful shutdown: flatten positions, save state, report.
+
+        Clears ``_running`` first. It previously relied entirely on the caller
+        having done so — true when start()'s loop exits normally, but not when
+        _shutdown() is invoked directly as an emergency stop, which left the
+        flag set and the runner still considering itself live while its
+        positions were being flattened.
+        """
+        self._running = False
+
         logger.info("=" * 60)
         logger.info("SHUTTING DOWN")
         logger.info("=" * 60)

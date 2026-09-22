@@ -128,14 +128,23 @@ class TestLLMInitBeforeStart:
             r._process_symbol("AAPL", market_open=True)
         mock_llm.reason.assert_called_once()
 
-    def test_llm_exception_handled(self, mock_deps):
+    def test_llm_failure_does_not_stop_the_cycle_or_open_a_trade(self, mock_deps):
+        """Asserted nothing: it ran the method and passed if it returned.
+
+        What matters is that a dead LLM endpoint degrades — the symbol is
+        still processed and no position is opened off a failed reasoner.
+        """
         r = _create_runner(mock_deps, mode="monitor")
         mock_llm = MagicMock()
         mock_llm.reason.side_effect = RuntimeError("API error")
         r._llm_reasoner = mock_llm
         mock_deps["fetcher"].fetch_ohlcv.return_value = _make_ohlcv(100)
+
         with patch.object(r, "_log_decision"):
             r._process_symbol("AAPL", market_open=True)
+
+        mock_llm.reason.assert_called()          # the failing path really ran
+        assert r._paper_positions == {}          # nothing opened off a failure
 
     def test_llm_override_blocked_by_risk(self, mock_deps):
         """LLM says BUY but risk manager blocks the trade."""
@@ -358,11 +367,17 @@ class TestInitialTraining:
         r._initial_training()
         mock_deps["agent"].train.assert_not_called()
 
-    def test_handles_train_exception(self, mock_deps):
+    def test_training_failure_leaves_the_runner_usable(self, mock_deps):
+        """A failed train must not leave the runner in a started state."""
         r = _create_runner(mock_deps)
         mock_deps["fetcher"].fetch_ohlcv.return_value = _make_ohlcv(200)
         mock_deps["agent"].train.side_effect = RuntimeError("train fail")
+
         r._initial_training()
+
+        mock_deps["agent"].train.assert_called()
+        assert r._running is False
+        assert r._cycle_count == 0
 
 
 class TestProcessSymbol:
@@ -390,62 +405,123 @@ class TestProcessSymbol:
 
 
 class TestStatusReport:
-    def test_report_no_positions(self, mock_deps):
+    @staticmethod
+    def _capture_report(runner):
+        """Capture what _print_status_report logs.
+
+        A dedicated handler rather than caplog: webhook_server.setup_logging()
+        calls logging.basicConfig(force=True), which removes caplog's handler
+        if that module was imported earlier in the session. Attaching straight
+        to the logger under test makes this independent of collection order.
+        """
+        import io
+        import logging
+
+        import shared.daemon.live_runner as live_runner_module
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.INFO)
+        # "live_runner", not "shared.daemon.live_runner": this module (like
+        # paper_trader and webhook_server) names its logger explicitly rather
+        # than using __name__. Left as-is because deployment log config may
+        # reference those names.
+        log = logging.getLogger(live_runner_module.logger.name)
+        previous_level, previous_propagate = log.level, log.propagate
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        try:
+            runner._print_status_report()
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(previous_level)
+            log.propagate = previous_propagate
+        return stream.getvalue()
+
+    def test_report_states_there_are_no_positions(self, mock_deps):
         r = _create_runner(mock_deps)
         r._paper_positions = {}
         r._paper_pnl = 0.0
         r._cycle_count = 10
-        r._print_status_report()
 
-    def test_report_with_positions(self, mock_deps):
+        out = self._capture_report(r)
+
+        assert "No open positions" in out
+        assert "10" in out, "cycle count missing from the report"
+
+    def test_report_names_the_open_position_and_pnl(self, mock_deps):
+        """A status report that omits your positions is not a status report."""
         r = _create_runner(mock_deps)
-        r._paper_positions = {"AAPL": {"shares": 100, "entry_price": 150.0, "direction": "long"}}
+        r._paper_positions = {
+            "AAPL": {"shares": 100, "entry_price": 150.0, "direction": "long"}}
         r._paper_pnl = 500.0
         r._cycle_count = 10
-        r._print_status_report()
+
+        out = self._capture_report(r)
+
+        assert "AAPL" in out
+        assert "100 shares" in out
+        assert "500" in out
 
 
 class TestSmartSleep:
-    def test_smart_sleep_market_open(self, mock_deps):
+    # These four asserted nothing at all — they ran _smart_sleep() and passed
+    # if it returned. The whole point of the method is WHICH interval it
+    # picks, so that is measured, by observing the time.sleep() calls.
+
+    @staticmethod
+    def _sleep_budget(runner):
+        """Total seconds _smart_sleep would sleep for, without sleeping."""
+        calls = []
+        with patch("shared.daemon.live_runner.time.sleep", side_effect=calls.append):
+            runner._running = True
+            # Stop after the first chunk so the loop terminates promptly.
+            original = calls.append
+
+            def stop_after_first(seconds):
+                original(seconds)
+                runner._running = False
+
+            with patch("shared.daemon.live_runner.time.sleep",
+                       side_effect=stop_after_first):
+                runner._smart_sleep()
+        return calls
+
+    def test_smart_sleep_market_open_uses_configured_interval(self, mock_deps):
+        r = _create_runner(mock_deps, interval_seconds=5)
+        mock_deps["fetcher"].is_market_open.return_value = True
+        with patch("shared.daemon.live_runner.datetime") as dt:
+            dt.now.return_value = MagicMock(weekday=lambda: 2)  # Wednesday
+            calls = self._sleep_budget(r)
+        assert calls, "no sleep happened at all"
+        assert calls[0] == 5, f"expected the configured 5s interval, slept {calls[0]}"
+
+    def test_smart_sleep_after_hours_backs_off_to_15_minutes(self, mock_deps):
+        r = _create_runner(mock_deps, interval_seconds=5)
+        mock_deps["fetcher"].is_market_open.return_value = False
+        with patch("shared.daemon.live_runner.datetime") as dt:
+            dt.now.return_value = MagicMock(weekday=lambda: 2)
+            calls = self._sleep_budget(r)
+        assert calls[0] == 10, "after hours should sleep in 10s chunks toward 900s"
+
+    def test_smart_sleep_is_responsive_to_shutdown(self, mock_deps):
+        """Chunked sleeping is what makes Ctrl-C prompt; verify the chunks."""
+        r = _create_runner(mock_deps, interval_seconds=3600)
+        mock_deps["fetcher"].is_market_open.return_value = True
+        with patch("shared.daemon.live_runner.datetime") as dt:
+            dt.now.return_value = MagicMock(weekday=lambda: 2)
+            calls = self._sleep_budget(r)
+        assert calls[0] <= 10, (
+            f"a shutdown would wait {calls[0]}s; sleep must be chunked"
+        )
+
+    def test_smart_sleep_returns_immediately_when_stopped(self, mock_deps):
         r = _create_runner(mock_deps, interval_seconds=5)
         r._running = False
         mock_deps["fetcher"].is_market_open.return_value = True
-        r._smart_sleep()
-
-    def test_smart_sleep_market_closed(self, mock_deps):
-        r = _create_runner(mock_deps, interval_seconds=5)
-        r._running = False
-        mock_deps["fetcher"].is_market_open.return_value = False
-        r._smart_sleep()
-
-    def test_smart_sleep_weekend(self, mock_deps):
-        r = _create_runner(mock_deps, interval_seconds=5)
-        r._running = False
-        with patch("shared.daemon.live_runner.datetime") as mock_dt:
-            mock_now = MagicMock()
-            mock_now.weekday.return_value = 5
-            mock_dt.now.return_value = mock_now
+        with patch("shared.daemon.live_runner.time.sleep") as slept:
             r._smart_sleep()
-
-    def test_smart_sleep_weekday_market_open(self, mock_deps):
-        r = _create_runner(mock_deps, interval_seconds=5)
-        r._running = False
-        with patch("shared.daemon.live_runner.datetime") as mock_dt:
-            mock_now = MagicMock()
-            mock_now.weekday.return_value = 2
-            mock_dt.now.return_value = mock_now
-            mock_deps["fetcher"].is_market_open.return_value = True
-            r._smart_sleep()
-
-    def test_smart_sleep_weekday_market_closed(self, mock_deps):
-        r = _create_runner(mock_deps, interval_seconds=5)
-        r._running = False
-        with patch("shared.daemon.live_runner.datetime") as mock_dt:
-            mock_now = MagicMock()
-            mock_now.weekday.return_value = 3
-            mock_dt.now.return_value = mock_now
-            mock_deps["fetcher"].is_market_open.return_value = False
-            r._smart_sleep()
+        slept.assert_not_called()
 
 
 class TestRunCycle:
@@ -470,11 +546,30 @@ class TestRunCycle:
             r._run_cycle()
             mock_report.assert_called_once()
 
-    def test_run_cycle_handles_process_error(self, mock_deps):
+    def test_one_symbol_failing_does_not_abort_the_cycle(self, mock_deps):
+        """Asserted nothing. A network blip on one symbol must not stop the
+        others from being processed, and must still advance the cycle."""
         r = _create_runner(mock_deps, mode="monitor")
         mock_deps["fetcher"].fetch_ohlcv.side_effect = RuntimeError("network")
-        mock_deps["fetcher"].is_market_open.return_value = True
+        # Market state comes from _market_hours, not the data fetcher —
+        # mocking the fetcher's is_market_open had no effect on the cycle.
+        # should_flatten_eod must be explicitly False: a bare MagicMock is
+        # truthy, which trips the EOD branch and returns before any symbol is
+        # looked at.
+        r._market_hours = MagicMock(
+            is_market_open=lambda: True,
+            is_trading_allowed=lambda: True,
+            should_flatten_eod=lambda: False,
+        )
+        before = r._tick_count   # _cycle_count is advanced by start(), not here
+
         r._run_cycle()
+
+        # Both configured symbols were attempted despite the first failing.
+        attempted = [c.args[0] for c in mock_deps["fetcher"].fetch_ohlcv.call_args_list]
+        assert set(attempted) >= {"AAPL", "MSFT"}
+        assert r._tick_count == before + 1
+        assert r._paper_positions == {}
 
     def test_run_cycle_with_broker_reconciliation(self, mock_deps):
         r = _create_runner(mock_deps, mode="paper")
@@ -492,15 +587,25 @@ class TestRunCycle:
         r._run_cycle()
         mock_bridge.reconcile_positions.assert_called_once()
 
-    def test_run_cycle_reconciliation_error(self, mock_deps):
+    def test_reconciliation_failure_does_not_abort_the_cycle(self, mock_deps):
         r = _create_runner(mock_deps, mode="paper")
         mock_bridge = MagicMock()
         mock_bridge.is_connected.return_value = True
         mock_bridge.reconcile_positions.side_effect = RuntimeError("err")
         r._broker_bridge = mock_bridge
         mock_deps["fetcher"].fetch_ohlcv.return_value = _make_ohlcv(100)
-        mock_deps["fetcher"].is_market_open.return_value = True
+        r._market_hours = MagicMock(
+            is_market_open=lambda: True,
+            is_trading_allowed=lambda: True,
+            should_flatten_eod=lambda: False,
+        )
+        before = r._tick_count
+
         r._run_cycle()
+
+        # _sync_positions() is what the cycle calls; it consults the bridge.
+        mock_bridge.is_connected.assert_called()
+        assert r._tick_count == before + 1, "cycle aborted on a reconcile error"
 
 
 class TestProcessSymbolAdvanced:
@@ -517,14 +622,19 @@ class TestProcessSymbolAdvanced:
             r._process_symbol("AAPL", market_open=True)
         mock_sentiment.analyze.assert_called_once()
 
-    def test_sentiment_exception_handled(self, mock_deps):
+    def test_sentiment_failure_still_reaches_the_agent(self, mock_deps):
+        """A dead news feed must not silently skip the decision entirely."""
         r = _create_runner(mock_deps, mode="monitor")
         mock_sentiment = MagicMock()
         mock_sentiment.analyze.side_effect = RuntimeError("API down")
         r._sentiment_analyzer = mock_sentiment
         mock_deps["fetcher"].fetch_ohlcv.return_value = _make_ohlcv(100)
+
         with patch.object(r, "_log_decision"):
             r._process_symbol("AAPL", market_open=True)
+
+        mock_deps["agent"].decide.assert_called()
+        assert r._paper_positions == {}
 
     def test_paper_mode_sell_skips_no_position(self, mock_deps):
         r = _create_runner(mock_deps, mode="paper")
@@ -559,9 +669,16 @@ class TestPaperTradingEdge:
         # raw = 500.0, commission = 50 * 0.005 * 2 = 0.50
         assert r._paper_pnl == pytest.approx(500.0 - 50 * 0.005 * 2)
 
-    def test_close_nonexistent_position(self, mock_deps):
+    def test_closing_an_unknown_symbol_changes_nothing(self, mock_deps):
         r = _create_runner(mock_deps, mode="paper")
+        r._paper_positions = {"AAPL": {"shares": 10, "entry_price": 100.0,
+                                       "direction": "long"}}
+        pnl_before = r._paper_pnl
+
         r._close_paper_position("NOPE", 100.0)
+
+        assert r._paper_pnl == pnl_before, "P&L moved on a phantom close"
+        assert set(r._paper_positions) == {"AAPL"}
 
 
 class TestLogDecision:
@@ -586,18 +703,26 @@ class TestLogDecision:
 
 
 class TestExecuteLiveTrade:
-    def test_live_trade_no_broker(self, mock_deps):
+    def test_live_trade_without_a_broker_opens_nothing(self, mock_deps):
+        """Asserted nothing — and this is the live-money path."""
         r = _create_runner(mock_deps, mode="live")
         r._broker_bridge = None
+
         r._execute_live_trade("AAPL", "BUY", 150.0, 0.8)
 
-    def test_live_trade_not_connected(self, mock_deps):
+        assert r._paper_positions == {}
+
+    def test_live_trade_does_not_order_when_the_broker_is_down(self, mock_deps):
+        """A failed reconnect must not be followed by an order attempt."""
         r = _create_runner(mock_deps, mode="live")
         mock_bridge = MagicMock()
         mock_bridge.is_connected.return_value = False
         mock_bridge.connect.return_value = False
         r._broker_bridge = mock_bridge
+
         r._execute_live_trade("AAPL", "BUY", 150.0, 0.8)
+
+        mock_bridge.execute_decision.assert_not_called()
 
     def test_live_trade_success(self, mock_deps):
         r = _create_runner(mock_deps, mode="live")
@@ -635,14 +760,20 @@ class TestShutdownAdvanced:
         with patch.object(mock_deps["agent"], "save_models"):
             r._shutdown()
 
-    def test_shutdown_save_models_failure(self, mock_deps):
+    def test_shutdown_completes_even_if_saving_models_fails(self, mock_deps):
+        """A full disk must not leave the runner stuck in a running state."""
         r = _create_runner(mock_deps)
         r._agent = mock_deps["agent"]
         r._paper_positions = {}
         r._paper_pnl = 0.0
         r._cycle_count = 5
+        r._running = True
         mock_deps["agent"].save_models.side_effect = RuntimeError("disk full")
+
         r._shutdown()
+
+        mock_deps["agent"].save_models.assert_called()
+        assert r._running is False
 
 
 class TestInitAdvanced:
