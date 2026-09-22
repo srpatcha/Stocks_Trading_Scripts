@@ -347,12 +347,54 @@ class TestMonthlyRiskCap:
         assert rm.can_trade() is False
 
     def test_monthly_cap_disabled(self):
+        """Disabling now takes both knobs to zero.
+
+        max_monthly_loss=0.0 used to mean "off". It now means "derive the cap
+        from max_monthly_loss_pct", which defaults to Elder's 6% — the layer
+        the README documents. Turning it off is explicit.
+        """
         from shared.risk_manager import RiskManager, RiskManagerConfig
-        rm = RiskManager(config=RiskManagerConfig(max_monthly_loss=0.0))
+        rm = RiskManager(config=RiskManagerConfig(
+            max_monthly_loss=0.0, max_monthly_loss_pct=0.0))
         rm.record_trade("AAPL", pnl=-50000)
-        # With monthly cap disabled, this check doesn't block (though other gates might)
-        # We just verify monthly_pnl isn't tracked
         assert rm.get_monthly_pnl() == 0.0
+
+    def test_monthly_cap_is_on_by_default_at_six_percent(self):
+        """Elder's 6% rule is documented as an active layer; it shipped off."""
+        from shared.risk_manager import RiskManager, RiskManagerConfig
+
+        cfg = RiskManagerConfig(total_capital=100_000.0)
+        assert cfg.monthly_loss_limit == pytest.approx(6_000.0)
+
+        # Raise the daily limit and widen the drawdown breaker so the monthly
+        # cap is unambiguously the gate under test.
+        cfg = RiskManagerConfig(
+            total_capital=100_000.0,
+            max_daily_loss=1e9,
+            max_drawdown_pct=100.0,
+            max_consecutive_losses=1000,
+            max_trades_per_hour=1000,
+            min_seconds_between_trades=0,
+        )
+        rm = RiskManager(config=cfg)
+        rm.record_trade("AAPL", pnl=-5_900.0)
+        assert rm.can_trade() is True, "under the 6% cap, trading continues"
+        rm.record_trade("MSFT", pnl=-200.0)
+        assert rm.can_trade() is False, "over the 6% cap, trading stops"
+
+    def test_monthly_pnl_is_tracked_when_the_cap_is_active(self):
+        """_monthly_pnl was not even accumulated, so this reported a false $0."""
+        from shared.risk_manager import RiskManager, RiskManagerConfig
+
+        rm = RiskManager(config=RiskManagerConfig(total_capital=100_000.0))
+        rm.record_trade("AAPL", pnl=-1_000.0)
+        assert rm.get_monthly_pnl() == pytest.approx(-1_000.0)
+
+    def test_explicit_dollar_cap_overrides_the_percentage(self):
+        from shared.risk_manager import RiskManagerConfig
+
+        cfg = RiskManagerConfig(total_capital=100_000.0, max_monthly_loss=2_500.0)
+        assert cfg.monthly_loss_limit == pytest.approx(2_500.0)
 
     def test_monthly_pnl_includes_wins(self):
         rm = self._make_rm(max_monthly_loss=5000.0)

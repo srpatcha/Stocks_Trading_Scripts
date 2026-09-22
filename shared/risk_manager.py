@@ -105,7 +105,14 @@ class RiskManagerConfig:
     pyramid_trail_stop_pct: float = 1.0
 
     # Monthly risk cap (Elder's 6% rule)
-    max_monthly_loss: float = 0.0  # 0 = disabled; e.g., 6000.0 for 6% of $100k
+    #
+    # Documented as an active layer but shipped as 0.0 — disabled — so it was
+    # enforced nowhere, and get_monthly_pnl() reported a false $0.00 because
+    # _monthly_pnl was not even accumulated. The percentage below is the
+    # effective setting; max_monthly_loss stays for callers that want to pin
+    # an absolute dollar figure and takes precedence when set.
+    max_monthly_loss: float = 0.0  # absolute $; 0 = derive from the pct below
+    max_monthly_loss_pct: float = 6.0  # Elder's 6% of capital; 0 = disabled
     monthly_reset_day: int = 1  # day of month to reset
 
     # ─── Production Safety (Critical) ───
@@ -135,6 +142,19 @@ class RiskManagerConfig:
     # State persistence (crash recovery)
     persist_path: Optional[str] = None
 
+    @property
+    def monthly_loss_limit(self) -> float:
+        """Effective monthly loss cap in dollars. 0 means disabled.
+
+        An explicit max_monthly_loss wins; otherwise it is derived from
+        max_monthly_loss_pct against total_capital.
+        """
+        if self.max_monthly_loss > 0:
+            return self.max_monthly_loss
+        if self.max_monthly_loss_pct > 0 and self.total_capital > 0:
+            return self.total_capital * (self.max_monthly_loss_pct / 100.0)
+        return 0.0
+
 
 @dataclass
 class TradeRecord:
@@ -146,7 +166,6 @@ class TradeRecord:
 
     def __post_init__(self) -> None:
         self.is_win = self.pnl > 0
-
 
 class RiskManager:
     """Manages risk controls across all trading strategies.
@@ -525,13 +544,13 @@ class RiskManager:
             return False
 
         # Monthly loss cap (Elder's 6% rule)
-        if self.config.max_monthly_loss > 0:
+        monthly_limit = self.config.monthly_loss_limit
+        if monthly_limit > 0:
             self._reset_monthly_if_needed()
-            if self._monthly_pnl <= -self.config.max_monthly_loss:
+            if self._monthly_pnl <= -monthly_limit:
                 logger.warning(
                     "Monthly loss limit reached: $%.2f (max: $%.2f)",
-                    self._monthly_pnl,
-                    self.config.max_monthly_loss,
+                    self._monthly_pnl, monthly_limit,
                 )
                 return False
 
@@ -640,8 +659,10 @@ class RiskManager:
                 self.config.circuit_breaker_pause_hours,
             )
 
-        # Monthly P&L tracking
-        if self.config.max_monthly_loss > 0:
+        # Monthly P&L tracking. Accumulate whenever the cap is configured;
+        # previously this was skipped when disabled, so get_monthly_pnl()
+        # reported $0.00 regardless of what had actually happened.
+        if self.config.monthly_loss_limit > 0:
             self._reset_monthly_if_needed()
             self._monthly_pnl += pnl
 

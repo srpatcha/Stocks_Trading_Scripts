@@ -407,10 +407,12 @@ class TestThreadSafety:
         for t in threads:
             t.join(timeout=30)
 
-        # Writes should all succeed; reads may occasionally get a transient
-        # SQLite API misuse error under heavy contention, which is acceptable
-        write_errors = [e for e in errors if "misuse" not in str(e)]
-        assert len(write_errors) == 0
+        # No errors at all. This used to filter out "SQLite API misuse" and
+        # call it acceptable — but that error means a read was executing on
+        # the shared connection while a write was mid-statement, because the
+        # readers did not take the lock. Serialising them removed the cause,
+        # so the test no longer has to excuse the symptom.
+        assert errors == [], f"concurrent access raised: {errors}"
         # All writer trades should have been recorded
         assert mem.get_trade_count() >= 10  # at least the seeded ones
         mem.close()

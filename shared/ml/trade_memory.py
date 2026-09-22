@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import functools
 import logging
 import sqlite3
 import threading
@@ -38,6 +39,22 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+def _synchronized(method):
+    """Serialise access to the shared SQLite connection.
+
+    One sqlite3 connection is shared across threads with
+    check_same_thread=False. The writers took the lock but the readers did
+    not, so a read could execute on the connection while a write was mid
+    statement — surfacing as "SQLite API misuse" under load. A test excused
+    that as "acceptable"; it is not, it is an unserialised shared cursor.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
 
 
 @dataclass
@@ -96,7 +113,9 @@ class TradeMemory:
 
     def __init__(self, db_path: str = "trade_memory.db") -> None:
         self._db_path = db_path
-        self._lock = threading.Lock()
+        # RLock so a synchronised method can call another, and so every
+        # access to the shared connection is serialised.
+        self._lock = threading.RLock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         # FIX 8: SQLite WAL mode for better concurrency
@@ -240,6 +259,7 @@ class TradeMemory:
 
     # ─── Query History ───
 
+    @_synchronized
     def query_similar_regime(
         self,
         regime: str,
@@ -318,6 +338,7 @@ class TradeMemory:
             "recommendation": "trade" if wins / len(rows) > 0.45 else "caution",
         }
 
+    @_synchronized
     def get_model_accuracy(
         self,
         model_name: str,
@@ -370,6 +391,7 @@ class TradeMemory:
             "needs_retrain": accuracy < 0.45 or trend < -0.1,
         }
 
+    @_synchronized
     def get_all_model_accuracies(self, window: int = 50) -> Dict[str, Dict[str, float]]:
         """Get accuracy for all tracked models.
 
@@ -385,6 +407,7 @@ class TradeMemory:
             for row in models
         }
 
+    @_synchronized
     def get_performance_summary(self, lookback_days: int = 30) -> Dict[str, Any]:
         """Get comprehensive performance summary.
 
@@ -448,6 +471,7 @@ class TradeMemory:
             "model_accuracies": self.get_all_model_accuracies(),
         }
 
+    @_synchronized
     def get_recent_trades(self, n: int = 20) -> List[Dict[str, Any]]:
         """Get the N most recent trades.
 
@@ -462,6 +486,7 @@ class TradeMemory:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    @_synchronized
     def get_trade_count(self) -> int:
         """Total number of trades in memory."""
         row = self._conn.execute("SELECT COUNT(*) as cnt FROM trades").fetchone()
@@ -489,6 +514,7 @@ class TradeMemory:
             self._conn.commit()
         logger.info("Trade memory cleanup: max_age=%dd, max_records=%d", max_age_days, max_records)
 
+    @_synchronized
     def close(self) -> None:
         """Close database connection."""
         self._conn.close()
