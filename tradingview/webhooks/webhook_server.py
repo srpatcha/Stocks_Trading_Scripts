@@ -30,7 +30,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ─── Graceful imports from shared modules ───
 try:
@@ -274,10 +274,32 @@ class AlertPayload(BaseModel):
     order_type: str = Field("market", description="Order type: market, limit, stop")
     passphrase: Optional[str] = Field(None, description="Webhook passphrase for auth")
     timestamp: Optional[str] = Field(None, description="Alert timestamp")
-    strategy: Optional[str] = Field(None, description="Strategy name")
-    timeframe: Optional[str] = Field(None, description="Chart timeframe")
-    message: Optional[str] = Field(None, description="Additional message")
-    regime: Optional[str] = Field(None, description="Market regime: TRENDING, RANGING, VOLATILE")
+    # These free-text fields were unconstrained. They are persisted onto trade
+    # records and rendered by the graph dashboard, so they are a stored-XSS
+    # input as well as a log-injection one (an embedded newline forges a log
+    # line). The dashboard escapes on output — this bounds them on input too,
+    # so neither layer is load-bearing on its own.
+    strategy: Optional[str] = Field(
+        None, max_length=64, pattern=r"^[\w .\-]+$", description="Strategy name",
+    )
+    timeframe: Optional[str] = Field(
+        None, max_length=16, pattern=r"^[\w]+$", description="Chart timeframe",
+    )
+    message: Optional[str] = Field(
+        None, max_length=500, description="Additional message",
+    )
+    regime: Optional[str] = Field(
+        None, max_length=32, pattern=r"^[\w\-]+$",
+        description="Market regime: TRENDING, RANGING, VOLATILE",
+    )
+
+    @field_validator("message")
+    @classmethod
+    def _no_control_characters(cls, v: Optional[str]) -> Optional[str]:
+        """Strip CR/LF so a message cannot forge additional log lines."""
+        if v is None:
+            return v
+        return v.replace("\r", " ").replace("\n", " ")
     signal: Optional[str] = Field(None, description="Signal type from strategy")
 
 

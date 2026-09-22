@@ -342,13 +342,50 @@ class TestCORSFix:
     Access-Control-Allow-Origin: * and Access-Control-Allow-Credentials: true.
     """
 
-    def test_cors_no_credentials_with_wildcard(self):
-        import inspect
+    @staticmethod
+    def _cors_options(cors_origins):
+        """Build an app and return its actual CORS middleware options."""
+        from unittest.mock import patch
+
+        from fastapi.middleware.cors import CORSMiddleware
         from tradingview.webhooks.webhook_server import create_app
-        src = inspect.getsource(create_app)
-        assert 'allow_credentials=False' in src
-        # CORS origins are now configurable via cors_origins config, not hardcoded wildcard
-        assert 'allow_origins=cors_origins' in src or 'cors_origins' in src
+
+        cfg = {
+            "server": {"host": "127.0.0.1", "port": 5000, "version": "t"},
+            "security": {
+                "hmac_secret": "a-real-secret-for-tests", "require_hmac": True,
+                "allowed_ips": [], "require_passphrase": False, "passphrase": "",
+                "cors_origins": cors_origins,
+            },
+            "rate_limiting": {"enabled": False},
+            "broker_routing": {"default_broker": "interactive_brokers", "routes": []},
+            "logging": {"level": "WARNING"},
+        }
+        with patch("tradingview.webhooks.webhook_server.load_config", return_value=cfg):
+            app = create_app()
+        for mw in app.user_middleware:
+            if mw.cls is CORSMiddleware:
+                return mw.kwargs
+        raise AssertionError("CORS middleware not installed")
+
+    def test_credentials_are_never_allowed(self):
+        """This asserted `'allow_credentials=False' in inspect.getsource(...)`.
+
+        It was the only test for a security control and it exercised none of
+        it — a comment mentioning the string would have satisfied it. It now
+        inspects the middleware the app actually installs.
+        """
+        assert self._cors_options([]).get("allow_credentials") is False
+
+    def test_origins_come_from_config(self):
+        opts = self._cors_options(["https://example.test"])
+        assert opts.get("allow_origins") == ["https://example.test"]
+
+    def test_default_origins_are_empty_not_wildcard(self):
+        """A wildcard plus credentials is the combination browsers refuse."""
+        opts = self._cors_options([])
+        assert opts.get("allow_origins") == []
+        assert "*" not in (opts.get("allow_origins") or [])
 
 
 # ═══════════════════════════════════════════════════════
@@ -358,20 +395,39 @@ class TestCORSFix:
 class TestSysPathGuarding:
     """Verify sys.path inserts are guarded with 'if path not in sys.path'."""
 
-    def test_ib_adapter_sys_path_guard(self):
-        import inspect
-        src = inspect.getsource(IBBrokerAdapter._init_adapter)
-        assert "if _ib_path not in sys.path" in src
+    # These asserted on source text — `"if _ib_path not in sys.path" in src`.
+    # That passes if the string appears in a comment and breaks on any
+    # equivalent rewrite. What actually matters is that repeated adapter
+    # initialisation does not keep growing sys.path, so that is what is
+    # measured.
 
-    def test_tradestation_adapter_sys_path_guard(self):
-        import inspect
-        src = inspect.getsource(TradeStationBrokerAdapter._init_adapter)
-        assert "if _ts_path not in sys.path" in src
+    @pytest.mark.parametrize("adapter_cls", [
+        IBBrokerAdapter, TradeStationBrokerAdapter, SchwabBrokerAdapter,
+    ])
+    def test_repeated_init_does_not_grow_sys_path(self, adapter_cls):
+        import sys
 
-    def test_schwab_adapter_sys_path_guard(self):
-        import inspect
-        src = inspect.getsource(SchwabBrokerAdapter._init_adapter)
-        assert "if _schwab_path not in sys.path" in src
+        adapter = adapter_cls({})
+        # Prime it once, then measure the delta from further calls. An
+        # absolute duplicate check would fail on entries the test harness
+        # itself duplicates: every test module does a bare
+        # sys.path.insert(0, PROJECT_ROOT).
+        try:
+            adapter._init_adapter()
+        except Exception:
+            pass
+
+        before = list(sys.path)
+        for _ in range(3):
+            try:
+                adapter._init_adapter()
+            except Exception:
+                # The broker package may be absent; the path handling still ran.
+                pass
+
+        added = [p for p in sys.path if p not in before]
+        assert not added, f"{adapter_cls.__name__} re-inserted into sys.path: {added}"
+        assert len(sys.path) == len(before), "sys.path grew on repeated init"
 
 
 # ═══════════════════════════════════════════════════════

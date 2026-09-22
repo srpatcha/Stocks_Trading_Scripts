@@ -116,12 +116,35 @@ class TestRiskParityEngine:
         weights = engine.risk_budgeting(returns, budgets=budgets)
         assert weights.sum() == pytest.approx(1.0, abs=1e-6)
 
-    def test_risk_budgeting_convergence_check(self):
-        """Verify fix: convergence check with np.allclose stops early."""
-        import inspect
-        from portfolio_backtester.risk_parity import RiskParityEngine
-        src = inspect.getsource(RiskParityEngine.risk_budgeting)
-        assert "allclose" in src
+    def test_risk_budgeting_produces_equal_risk_contributions(self):
+        """Assert the result, not that the source mentions "allclose".
+
+        Equal risk budgeting on uncorrelated assets should weight the
+        lower-volatility asset more heavily, and the weights must form a
+        simplex. The old version only checked that a word appeared in the
+        function body.
+        """
+        import numpy as np
+        import pandas as pd
+        from portfolio_backtester.risk_parity import (
+            RiskParityConfig, RiskParityEngine,
+        )
+
+        rng = np.random.default_rng(7)
+        n = 500
+        returns = pd.DataFrame({
+            "LOWVOL": rng.normal(0, 0.005, n),
+            "HIGHVOL": rng.normal(0, 0.020, n),
+        })
+
+        engine = RiskParityEngine(RiskParityConfig())
+        w = engine.risk_budgeting(returns)
+
+        assert float(w.sum()) == pytest.approx(1.0, abs=1e-6)
+        assert (w >= 0).all(), "risk budgeting produced a negative weight"
+        assert w["LOWVOL"] > w["HIGHVOL"], (
+            "equal risk contribution must overweight the calmer asset"
+        )
 
     def test_clip_weights(self):
         from portfolio_backtester.risk_parity import RiskParityEngine, RiskParityConfig
@@ -194,27 +217,100 @@ class TestPortfolioEngine:
         expected = {"equal_weight", "momentum", "risk_parity", "mean_variance", "tactical"}
         assert expected == set(PortfolioEngine.STRATEGY_MAP.keys())
 
-    def test_cagr_guard(self):
-        """Verify fix: CAGR guard handles edge cases (n_years=0, negative equity)."""
-        import inspect
-        from portfolio_backtester.portfolio_engine import PortfolioEngine
-        src = inspect.getsource(PortfolioEngine._convert_result)
-        assert "n_years > 0" in src or "max(0.0001" in src
+    # The three tests below asserted on the SOURCE TEXT of _convert_result —
+    # `"max(0.0001" in src`, `"100.0" in src`, `"len(neg_ret) <= 1" in src`.
+    # They passed if the string appeared in a comment and broke on any
+    # equivalent rewrite, while verifying none of the arithmetic. They now
+    # drive _convert_result with constructed results and check the numbers.
 
-    def test_rebased_prices_detection(self):
-        """Verify fix: bt returns 100-based rebased prices, converted back."""
-        import inspect
-        from portfolio_backtester.portfolio_engine import PortfolioEngine
-        src = inspect.getsource(PortfolioEngine._convert_result)
-        assert "100.0" in src
-        assert "initial" in src
+    @staticmethod
+    def _bt_result(equity_values, strategy_name="s", periods=None):
+        """Minimal stand-in for a bt result object."""
+        import pandas as pd
 
-    def test_sortino_single_neg_return(self):
-        """Verify fix: Sortino handles 1 negative return edge case."""
-        import inspect
-        from portfolio_backtester.portfolio_engine import PortfolioEngine
-        src = inspect.getsource(PortfolioEngine._convert_result)
-        assert "len(neg_ret) <= 1" in src or "len(neg_ret) == 1" in src
+        idx = pd.date_range("2020-01-01", periods=periods or len(equity_values),
+                            freq="D")
+        prices = pd.DataFrame({strategy_name: equity_values}, index=idx)
+
+        class _R:
+            pass
+
+        r = _R()
+        r.prices = prices
+        r.stats = None
+        return r
+
+    def _engine(self, initial_capital=100_000.0):
+        """Build an engine without going through __init__.
+
+        PortfolioEngine.__init__ raises ImportError unless the optional `bt`
+        package is installed, but _convert_result does not touch bt at all —
+        it is pure arithmetic over a price series. Constructing directly keeps
+        these numeric tests runnable in a minimal environment instead of
+        skipping, which is what hid the untested arithmetic in the first place.
+        """
+        from portfolio_backtester.portfolio_engine import (
+            PortfolioBacktestConfig, PortfolioEngine,
+        )
+        engine = PortfolioEngine.__new__(PortfolioEngine)
+        engine.config = PortfolioBacktestConfig(initial_capital=initial_capital)
+        return engine
+
+    def test_rebased_prices_are_converted_back_to_absolute(self):
+        """bt returns a 100-based series; CAGR is nonsense if taken literally."""
+        engine = self._engine(initial_capital=100_000.0)
+        # 100 -> 110 is +10%, whatever the capital base.
+        result = engine._convert_result(
+            self._bt_result([100.0, 105.0, 110.0]), "s")
+        assert result.total_return == pytest.approx(0.10, rel=1e-6)
+
+    def test_absolute_series_is_left_alone(self):
+        engine = self._engine(initial_capital=100_000.0)
+        result = engine._convert_result(
+            self._bt_result([100_000.0, 105_000.0, 110_000.0]), "s")
+        assert result.total_return == pytest.approx(0.10, rel=1e-6)
+
+    def test_cagr_is_finite_for_a_near_total_loss(self):
+        """Without the floor, a ratio of 0 raised to 1/n_years blows up."""
+        import math
+
+        engine = self._engine(initial_capital=100_000.0)
+        result = engine._convert_result(
+            self._bt_result([100_000.0, 50_000.0, 0.0]), "s")
+        assert math.isfinite(result.cagr)
+        assert result.cagr < 0
+
+    def test_cagr_is_finite_for_a_single_day(self):
+        engine = self._engine(initial_capital=100_000.0)
+        result = engine._convert_result(
+            self._bt_result([100_000.0, 100_500.0]), "s")
+        import math
+        assert math.isfinite(result.cagr)
+
+    def test_sortino_is_finite_with_a_single_negative_return(self):
+        """std() of one sample is NaN, so the naive formula produces NaN."""
+        import math
+
+        engine = self._engine(initial_capital=100_000.0)
+        # Exactly one down day.
+        result = engine._convert_result(
+            self._bt_result([100_000.0, 101_000.0, 100_500.0, 101_500.0]), "s")
+        assert math.isfinite(result.sortino_ratio)
+
+    def test_sortino_is_finite_with_no_negative_returns(self):
+        import math
+
+        engine = self._engine(initial_capital=100_000.0)
+        result = engine._convert_result(
+            self._bt_result([100_000.0, 101_000.0, 102_000.0]), "s")
+        assert math.isfinite(result.sortino_ratio)
+
+    def test_max_drawdown_is_negative_and_bounded(self):
+        engine = self._engine(initial_capital=100_000.0)
+        result = engine._convert_result(
+            self._bt_result([100_000.0, 120_000.0, 90_000.0, 110_000.0]), "s")
+        # Peak 120k -> trough 90k is -25%.
+        assert result.max_drawdown == pytest.approx(-0.25, rel=1e-6)
 
     def test_convert_result_with_mock(self):
         from portfolio_backtester.portfolio_engine import PortfolioEngine, _HAS_BT, _HAS_ENGINE

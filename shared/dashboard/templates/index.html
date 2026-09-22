@@ -181,12 +181,27 @@ function recordClientWsMessage() {
     clientPerf.wsLastMessageTime = now;
 }
 
+function escapeHtml(value) {
+    // Everything rendered below originates in graph_memory, which is fed from
+    // trade records — and symbol/strategy names on those records come from
+    // inbound webhook payloads. They were interpolated straight into
+    // innerHTML, so a crafted strategy name executed script in the operator's
+    // browser, on a dashboard that also shows account state.
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function initFilters() {
     const container = document.getElementById('filters');
     container.innerHTML = NODE_TYPES.map(t => {
         const col = TYPE_COLORS[t];
-        return '<label><input type="checkbox" checked data-type="' + t + '" onchange="applyFilters()">' +
-               '<span style="color:' + col + '">' + t + '</span></label>';
+        return '<label><input type="checkbox" checked data-type="' + escapeHtml(t) + '" onchange="applyFilters()">' +
+               '<span style="color:' + escapeHtml(col) + '">' + escapeHtml(t) + '</span></label>';
     }).join('');
 }
 
@@ -278,18 +293,31 @@ function showNodeDetail(nodeId) {
     attrs.innerHTML = Object.entries(raw).map(function(entry) {
         let val = entry[1];
         if (typeof val === 'number') val = Math.round(val * 10000) / 10000;
-        return '<span class="attr-key">' + entry[0] + ':</span><span class="attr-val">' + val + '</span>';
+        return '<span class="attr-key">' + escapeHtml(entry[0]) + ':</span>' +
+               '<span class="attr-val">' + escapeHtml(val) + '</span>';
     }).join('');
 
     const neighbors = document.getElementById('detail-neighbors');
     const connected = network.getConnectedNodes(nodeId);
     if (connected.length > 0) {
+        // The node id was interpolated into an inline onclick, so it was
+        // injected into a JavaScript context, not just an HTML one — an id
+        // containing a quote broke out of the handler entirely. Carry it in a
+        // data attribute and bind a listener instead.
         neighbors.innerHTML = '<strong>Neighbors:</strong> ' +
             connected.map(function(cid) {
                 const cn = allNodes.find(n => n.id === cid);
                 const lbl = cn ? cn.label : cid;
-                return '<span onclick="network.selectNodes([\'' + cid + '\']);showNodeDetail(\'' + cid + '\')">' + lbl + '</span>';
+                return '<span class="neighbor-link" data-node-id="' +
+                       escapeHtml(cid) + '">' + escapeHtml(lbl) + '</span>';
             }).join('');
+        neighbors.querySelectorAll('.neighbor-link').forEach(function(el) {
+            el.addEventListener('click', function() {
+                const id = el.getAttribute('data-node-id');
+                network.selectNodes([id]);
+                showNodeDetail(id);
+            });
+        });
     } else {
         neighbors.innerHTML = '<em>No connections</em>';
     }
@@ -301,21 +329,24 @@ async function loadStats() {
     const stats = await fetchJSON('/api/stats');
     const panel = document.getElementById('stats-panel');
     let html = '';
-    html += '<div class="stat-row"><span class="stat-label">Nodes</span><span class="stat-value">' + stats.total_nodes + '</span></div>';
-    html += '<div class="stat-row"><span class="stat-label">Edges</span><span class="stat-value">' + stats.total_edges + '</span></div>';
-    html += '<div class="stat-row"><span class="stat-label">Density</span><span class="stat-value">' + stats.density + '</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">Nodes</span><span class="stat-value">' + escapeHtml(stats.total_nodes) + '</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">Edges</span><span class="stat-value">' + escapeHtml(stats.total_edges) + '</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">Density</span><span class="stat-value">' + escapeHtml(stats.density) + '</span></div>';
 
     if (stats.node_types) {
         html += '<div style="margin-top:8px;font-size:12px;color:#8b949e">Node types:</div>';
         Object.entries(stats.node_types).forEach(function(entry) {
             const cls = 'badge-' + (entry[0] === 'feature_state' ? 'feature' : entry[0]);
-            html += '<span class="badge ' + cls + '">' + entry[0] + ': ' + entry[1] + '</span>';
+            html += '<span class="badge ' + escapeHtml(cls) + '">' +
+                    escapeHtml(entry[0]) + ': ' + escapeHtml(entry[1]) + '</span>';
         });
     }
     if (stats.edge_types) {
         html += '<div style="margin-top:8px;font-size:12px;color:#8b949e">Edge types:</div>';
         Object.entries(stats.edge_types).forEach(function(entry) {
-            html += '<div class="stat-row"><span class="stat-label">' + entry[0] + '</span><span class="stat-value">' + entry[1] + '</span></div>';
+            html += '<div class="stat-row"><span class="stat-label">' +
+                    escapeHtml(entry[0]) + '</span><span class="stat-value">' +
+                    escapeHtml(entry[1]) + '</span></div>';
         });
     }
     panel.innerHTML = html;
@@ -338,7 +369,8 @@ async function loadTransitions() {
         Object.entries(targets).forEach(function(t) {
             const pct = (t[1] * 100).toFixed(1);
             const barW = Math.max(4, t[1] * 80);
-            html += '<tr><td style="color:#e74c3c">' + from + '</td><td style="color:#e74c3c">' + t[0] + '</td>' +
+            html += '<tr><td style="color:#e74c3c">' + escapeHtml(from) + '</td>' +
+                    '<td style="color:#e74c3c">' + escapeHtml(t[0]) + '</td>' +
                     '<td><span class="prob-bar" style="width:' + barW + 'px"></span>' + pct + '%</td></tr>';
         });
     });
@@ -362,8 +394,8 @@ async function loadStrategies() {
         const s = entry[1];
         const wrPct = (s.win_rate * 100).toFixed(1);
         html += '<div class="strategy-card">' +
-                '<div class="name">' + s.strategy + '</div>' +
-                '<div class="regime-label">in ' + regime + '</div>' +
+                '<div class="name">' + escapeHtml(s.strategy) + '</div>' +
+                '<div class="regime-label">in ' + escapeHtml(regime) + '</div>' +
                 '<div class="metrics">' +
                 '<div>WR: <span class="metric-val">' + wrPct + '%</span></div>' +
                 '<div>PnL: <span class="metric-val">' + s.avg_pnl.toFixed(2) + '</span></div>' +
@@ -394,23 +426,23 @@ function renderPerfPanel(server) {
 
     // Top metrics grid
     html += '<div class="perf-grid">';
-    html += '<div class="perf-metric"><div class="val">' + uptime + '</div><div class="label">Uptime</div></div>';
-    html += '<div class="perf-metric"><div class="val">' + server.active_ws_connections + '</div><div class="label">WS Clients</div></div>';
-    html += '<div class="perf-metric"><div class="val">' + server.total_requests + '</div><div class="label">API Calls</div></div>';
+    html += '<div class="perf-metric"><div class="val">' + escapeHtml(uptime) + '</div><div class="label">Uptime</div></div>';
+    html += '<div class="perf-metric"><div class="val">' + escapeHtml(server.active_ws_connections) + '</div><div class="label">WS Clients</div></div>';
+    html += '<div class="perf-metric"><div class="val">' + escapeHtml(server.total_requests) + '</div><div class="label">API Calls</div></div>';
     html += '<div class="perf-metric"><div class="val ' + latencyColor(wstp > 0 ? 1 : 0) + '">' + wstp.toFixed(1) + '</div><div class="label">WS msg/s</div></div>';
     html += '</div>';
 
     // WS throughput
     html += '<div style="margin-top:8px">';
-    html += '<div class="stat-row"><span class="stat-label">WS Sent</span><span class="stat-value">' + server.websocket.messages_sent + '</span></div>';
-    html += '<div class="stat-row"><span class="stat-label">WS Failed</span><span class="stat-value ' + (server.websocket.messages_failed > 0 ? 'perf-val-bad' : '') + '">' + server.websocket.messages_failed + '</span></div>';
-    html += '<div class="stat-row"><span class="stat-label">WS Broadcast Avg</span><span class="stat-value">' + server.websocket.avg_broadcast_ms + 'ms</span></div>';
-    html += '<div class="stat-row"><span class="stat-label">WS Broadcast P95</span><span class="stat-value">' + server.websocket.p95_broadcast_ms + 'ms</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">WS Sent</span><span class="stat-value">' + escapeHtml(server.websocket.messages_sent) + '</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">WS Failed</span><span class="stat-value ' + (server.websocket.messages_failed > 0 ? 'perf-val-bad' : '') + '">' + escapeHtml(server.websocket.messages_failed) + '</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">WS Broadcast Avg</span><span class="stat-value">' + escapeHtml(server.websocket.avg_broadcast_ms) + 'ms</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">WS Broadcast P95</span><span class="stat-value">' + escapeHtml(server.websocket.p95_broadcast_ms) + 'ms</span></div>';
     html += '</div>';
 
     // Client-side WS stats
     html += '<div style="margin-top:6px;font-size:11px;color:#8b949e">Client-side:</div>';
-    html += '<div class="stat-row"><span class="stat-label">WS Received</span><span class="stat-value">' + clientPerf.wsMessagesReceived + '</span></div>';
+    html += '<div class="stat-row"><span class="stat-label">WS Received</span><span class="stat-value">' + escapeHtml(clientPerf.wsMessagesReceived) + '</span></div>';
 
     // API latency table
     var endpoints = Object.keys(server.api_latency);
@@ -421,10 +453,10 @@ function renderPerfPanel(server) {
             var s = server.api_latency[ep];
             html += '<tr>';
             html += '<td>' + ep.replace('/api/', '') + '</td>';
-            html += '<td class="' + latencyColor(s.avg_ms) + '">' + s.avg_ms + '</td>';
-            html += '<td>' + s.p50_ms + '</td>';
-            html += '<td class="' + latencyColor(s.p95_ms) + '">' + s.p95_ms + '</td>';
-            html += '<td>' + s.count + '</td>';
+            html += '<td class="' + latencyColor(s.avg_ms) + '">' + escapeHtml(s.avg_ms) + '</td>';
+            html += '<td>' + escapeHtml(s.p50_ms) + '</td>';
+            html += '<td class="' + latencyColor(s.p95_ms) + '">' + escapeHtml(s.p95_ms) + '</td>';
+            html += '<td>' + escapeHtml(s.count) + '</td>';
             html += '</tr>';
         });
         html += '</table>';
@@ -443,7 +475,7 @@ function renderPerfPanel(server) {
     // Error rate
     if (server.total_requests > 0) {
         var errPct = (server.error_rate * 100).toFixed(2);
-        html += '<div style="margin-top:6px" class="stat-row"><span class="stat-label">Error Rate</span><span class="stat-value ' + (server.error_rate > 0.01 ? 'perf-val-bad' : 'perf-val-good') + '">' + errPct + '%</span></div>';
+        html += '<div style="margin-top:6px" class="stat-row"><span class="stat-label">Error Rate</span><span class="stat-value ' + (server.error_rate > 0.01 ? 'perf-val-bad' : 'perf-val-good') + '">' + escapeHtml(errPct) + '%</span></div>';
     }
 
     panel.innerHTML = html;
@@ -637,7 +669,11 @@ function showToast(title, body, cls) {
 
     var el = document.createElement('div');
     el.className = 'toast ' + (cls || '');
-    el.innerHTML = '<div class="toast-title">' + title + '</div><div class="toast-body">' + body + '</div>';
+    // Escaped here rather than at each call site: every caller feeds this
+    // from WebSocket payloads (symbol, action, regime names), which trace
+    // back to inbound webhook alerts.
+    el.innerHTML = '<div class="toast-title">' + escapeHtml(title) + '</div>' +
+                   '<div class="toast-body">' + escapeHtml(body) + '</div>';
     container.appendChild(el);
 
     var entry = {el: el, timer: null};

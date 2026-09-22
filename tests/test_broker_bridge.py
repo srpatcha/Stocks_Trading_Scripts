@@ -475,11 +475,47 @@ class TestReconcile:
 
 class TestFieldNameFix:
     def test_tradestation_get_latest_price_uses_field_name(self):
-        """Verify fix: iterates with field_name, not field."""
-        import inspect
-        source = inspect.getsource(TradeStationAdapter.get_latest_price)
-        assert "field_name" in source
-        assert "for field " not in source or "field_name" in source
+        """Quote fields are tried in preference order: Last, Ask, Bid, Close.
+
+        This asserted on the SOURCE TEXT — `"field_name" in source` — and its
+        second assertion, `"for field " not in source or "field_name" in
+        source`, could never fail: the line above had already established the
+        right operand. It passed on any refactor and tested no behaviour.
+        """
+        adapter = TradeStationAdapter({}, account_id="A1")
+
+        class Router:
+            def __init__(self, quote):
+                self._quote = quote
+
+            def get_quote(self, symbol):
+                return self._quote
+
+        # Preference order.
+        adapter._router = Router({"Last": 101.5, "Ask": 102.0, "Bid": 101.0})
+        assert adapter.get_latest_price("AAPL") == pytest.approx(101.5)
+
+        # Falls through missing fields.
+        adapter._router = Router({"Ask": 102.0, "Bid": 101.0})
+        assert adapter.get_latest_price("AAPL") == pytest.approx(102.0)
+
+        # Skips non-positive values rather than returning them.
+        adapter._router = Router({"Last": 0, "Ask": None, "Bid": 99.5})
+        assert adapter.get_latest_price("AAPL") == pytest.approx(99.5)
+
+        # No usable field, a broken router, and no router at all all give 0.0.
+        adapter._router = Router({"Last": None})
+        assert adapter.get_latest_price("AAPL") == 0.0
+
+        class Broken:
+            def get_quote(self, symbol):
+                raise RuntimeError("quote feed down")
+
+        adapter._router = Broken()
+        assert adapter.get_latest_price("AAPL") == 0.0
+
+        adapter._router = None
+        assert adapter.get_latest_price("AAPL") == 0.0
 
 
 # ── __repr__ ─────────────────────────────────────────────────────────────

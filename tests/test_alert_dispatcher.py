@@ -285,13 +285,28 @@ class TestHasRequestsFlag:
     def test_flag_is_boolean(self):
         assert isinstance(_HAS_REQUESTS, bool)
 
-    def test_discord_and_sms_guarded(self):
-        """Both _send_discord and _send_sms check _HAS_REQUESTS."""
-        import inspect
-        discord_src = inspect.getsource(AlertDispatcher._send_discord)
-        sms_src = inspect.getsource(AlertDispatcher._send_sms)
-        assert "_HAS_REQUESTS" in discord_src
-        assert "_HAS_REQUESTS" in sms_src
+    def test_discord_and_sms_degrade_without_requests(self):
+        """Without `requests`, both channels skip instead of raising.
+
+        This asserted `"_HAS_REQUESTS" in inspect.getsource(...)`, which a
+        comment mentioning the name would satisfy and which breaks on any
+        equivalent rewrite. What matters is that a missing optional dependency
+        does not take down alerting — so that is what is exercised.
+        """
+        from unittest.mock import patch
+
+        dispatcher = AlertDispatcher({
+            "enabled_channels": ["discord", "sms"],
+            "discord": {"webhook_url": "https://example.test/hook"},
+            "sms": {"account_sid": "x", "auth_token": "y",
+                    "from_number": "+1", "to_number": "+2"},
+        })
+
+        with patch("shared.notifier.alert_dispatcher._HAS_REQUESTS", False):
+            # Must not raise, and must not attempt any HTTP call.
+            with patch("shared.notifier.alert_dispatcher.requests") as req:
+                dispatcher.dispatch(title="t", message="m", priority="INFO")
+                req.post.assert_not_called()
 
 
 # ── Priority color constants ────────────────────────────────────────────
