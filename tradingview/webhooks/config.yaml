@@ -19,6 +19,7 @@ server:
 security:
   hmac_secret: "CHANGE_ME_TO_A_SECURE_SECRET_KEY"
   hmac_algorithm: "sha256"
+  # Accepts plain addresses and CIDR ranges. An empty list disables the check.
   allowed_ips:
     - "52.89.214.238"    # TradingView webhook IP
     - "34.212.75.30"     # TradingView webhook IP
@@ -26,7 +27,26 @@ security:
     - "52.32.178.7"      # TradingView webhook IP
     - "127.0.0.1"        # Localhost
     - "::1"              # Localhost IPv6
-  require_passphrase: true
+
+  # Reverse proxies whose X-Forwarded-For header is trusted. Leave EMPTY
+  # unless this server really does sit behind a proxy you control.
+  #
+  # Without this the allowlist and the rate limiter both key on the immediate
+  # peer, which behind a proxy is the proxy itself — so the allowlist admits
+  # everyone or no one, and every client shares one rate-limit bucket. With it
+  # set, X-Forwarded-For is honoured ONLY when the peer is one of these, so a
+  # direct caller cannot spoof the header past the allowlist.
+  trusted_proxies: []
+    # - "10.0.0.0/8"
+    # - "172.17.0.1"
+  # Off by default, deliberately. This shipped as `true` with the placeholder
+  # below — and that placeholder is public in this repository, so it
+  # authenticated nobody while looking configured. HMAC is the real
+  # authentication here.
+  #
+  # To use a passphrase as well: set a real value AND flip this to true. The
+  # server refuses to start if you enable it and leave the placeholder.
+  require_passphrase: false
   passphrase: "CHANGE_ME_WEBHOOK_PASSPHRASE"
 
   # Replay window. An alert older (or further in the future) than this is

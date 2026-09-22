@@ -31,30 +31,23 @@ _TV_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tradin
 if _TV_ROOT not in sys.path:
     sys.path.insert(0, _TV_ROOT)
 
-# Mock heavy external deps before import
-sys.modules.setdefault("yaml", MagicMock())
-sys.modules.setdefault("fastapi", MagicMock())
-sys.modules.setdefault("fastapi.middleware.cors", MagicMock())
-sys.modules.setdefault("fastapi.responses", MagicMock())
-sys.modules.setdefault("pydantic", MagicMock())
-sys.modules.setdefault("uvicorn", MagicMock())
-
-# We need real yaml for load_config tests; import after path setup
-for mod_name in list(sys.modules):
-    if mod_name.startswith("yaml") or mod_name.startswith("fastapi") or mod_name.startswith("pydantic"):
-        del sys.modules[mod_name]
-
-import yaml  # real yaml
-
-# Now do the real import with mocked fastapi/pydantic
-with patch.dict(sys.modules, {
-    "fastapi": MagicMock(),
-    "fastapi.middleware.cors": MagicMock(),
-    "fastapi.responses": MagicMock(),
-    "pydantic": MagicMock(),
-}):
-    # We need to import the functions we can test standalone
-    pass
+# This file used to install MagicMocks into sys.modules for yaml, fastapi,
+# pydantic and uvicorn, then delete three of them again, then open a
+# `with patch.dict(...)` block whose entire body was `pass`. Three problems:
+#
+#   1. The patch.dict block did nothing — the real import below ran against
+#      whatever was actually installed, so the apparatus was decorative.
+#   2. uvicorn was never cleaned up. setdefault() fires when the key is
+#      absent, so it SHADOWED the real uvicorn and left a MagicMock in
+#      sys.modules for the rest of the pytest session; any later test
+#      importing uvicorn silently got a mock.
+#   3. Deleting already-imported yaml/fastapi/pydantic forced a re-import and
+#      created duplicate class objects, so isinstance() checks against types
+#      held by earlier-imported modules started returning False.
+#
+# These dependencies are in requirements-core.txt and are genuinely installed,
+# so the tests just import them.
+import yaml
 
 # Direct function imports for unit-testable pieces
 from tradingview.webhooks.webhook_server import (

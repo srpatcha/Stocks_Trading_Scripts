@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -79,6 +80,83 @@ except ImportError:
         "AMT": "Real Estate", "PLD": "Real Estate", "CCI": "Real Estate",
         "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "DIA": "ETF",
     }
+
+
+
+# ─── Client identity and request limits ───
+
+#: Reject bodies larger than this before reading them. An alert is a few
+#: hundred bytes; `await request.body()` buffered the whole payload into
+#: memory before the HMAC was even computed, so an unauthenticated caller
+#: could stream an arbitrarily large body at the process.
+MAX_BODY_BYTES = 64 * 1024
+
+
+def _parse_allowlist(entries: List[str]):
+    """Parse allowlist entries into networks. Accepts plain IPs and CIDRs.
+
+    The allowlist was exact string matching, so a CIDR could not be expressed
+    at all — and TradingView publishes ranges, not a fixed set of addresses.
+    """
+    networks = []
+    for raw in entries or []:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(text, strict=False))
+        except ValueError:
+            logger.error("Ignoring malformed allowlist entry %r", text)
+    return networks
+
+
+def client_ip_of(request: Request, config: dict) -> str:
+    """Best available client address.
+
+    ``request.client.host`` is the immediate peer. Behind the reverse proxy
+    this server needs anyway (it speaks plaintext HTTP and the passphrase is
+    in the body), that is the PROXY's address — so the IP allowlist admitted
+    everyone or no one, and every client shared a single rate-limit bucket.
+
+    X-Forwarded-For is only honoured when the peer is a configured trusted
+    proxy; otherwise any caller could spoof their way past the allowlist by
+    setting a header.
+    """
+    peer = request.client.host if request.client else "unknown"
+    trusted = _parse_allowlist(
+        config.get("security", {}).get("trusted_proxies", []))
+    if not trusted:
+        return peer
+    try:
+        peer_addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if not any(peer_addr in net for net in trusted):
+        return peer
+
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if not forwarded:
+        return peer
+    # Left-most entry is the original client; the proxy appends as it forwards.
+    candidate = forwarded.split(",")[0].strip()
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        logger.warning("Malformed X-Forwarded-For from trusted proxy: %r", forwarded)
+        return peer
+    return candidate
+
+
+def ip_allowed(ip: str, allowed_entries: List[str]) -> bool:
+    """True when ``ip`` falls inside the allowlist, or the list is empty."""
+    networks = _parse_allowlist(allowed_entries)
+    if not networks:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in networks)
 
 
 # ─── Configuration Loading ───
@@ -1306,14 +1384,31 @@ def create_app(config_path: str = None) -> FastAPI:
             security_cfg["hmac_secret"] = generated_secret
             config["security"] = security_cfg
             logger.critical(
-                "HMAC secret was empty/default. Generated random secret for this session: %s",
-                generated_secret,
+                "HMAC secret was empty/default. Generated a random secret for "
+                "this session. Set security.hmac_secret in config.yaml — until "
+                "you do, every restart invalidates previously-signed alerts and "
+                "each worker generates a different one."
             )
-            print(f"\n⚠️  GENERATED HMAC SECRET (save this in config.yaml): {generated_secret}\n")
         else:
             logger.warning(
                 "HMAC secret is empty/default and require_hmac=False. "
                 "Webhook signature validation is DISABLED. This is insecure!"
+            )
+
+    # The passphrase had no equivalent guard: the shipped placeholder is in the
+    # repository, so require_passphrase=true with the default value is exactly
+    # as good as no passphrase at all, while looking configured.
+    weak_passphrases = {
+        "", "CHANGE_ME", "CHANGE_ME_WEBHOOK_PASSPHRASE", "changeme", "password",
+    }
+    if security_cfg.get("require_passphrase", False):
+        if security_cfg.get("passphrase", "") in weak_passphrases:
+            raise RuntimeError(
+                "security.require_passphrase is true but security.passphrase is "
+                "empty or still the shipped placeholder. That placeholder is "
+                "public in this repository, so it authenticates nobody. Set a "
+                "real passphrase in config.yaml, or set require_passphrase: "
+                "false if you are relying on HMAC and the IP allowlist alone."
             )
 
     server_config = config.get("server", {})
@@ -1410,7 +1505,7 @@ def create_app(config_path: str = None) -> FastAPI:
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         start = time.time()
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = client_ip_of(request, config)
         logger.info(f"→ {request.method} {request.url.path} from {client_ip}")
 
         response = await call_next(request)
@@ -1430,10 +1525,10 @@ def create_app(config_path: str = None) -> FastAPI:
         the caller is not authorised.
         """
         security_config = config.get("security", {})
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = client_ip_of(request, config)
 
         allowed_ips = security_config.get("allowed_ips", [])
-        if allowed_ips and client_ip not in allowed_ips:
+        if not ip_allowed(client_ip, allowed_ips):
             logger.warning("Rejected read request from unauthorized IP: %s", client_ip)
             raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -1476,12 +1571,12 @@ def create_app(config_path: str = None) -> FastAPI:
         Validates HMAC signature, checks rate limits, authenticates passphrase,
         routes to appropriate broker, and dispatches notifications.
         """
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = client_ip_of(request, config)
         security_config = config.get("security", {})
 
         # ── IP Allowlist Check ──
         allowed_ips = security_config.get("allowed_ips", [])
-        if allowed_ips and client_ip not in allowed_ips:
+        if not ip_allowed(client_ip, allowed_ips):
             logger.warning(f"Rejected request from unauthorized IP: {client_ip}")
             raise HTTPException(status_code=403, detail="IP not allowed")
 
@@ -1496,7 +1591,16 @@ def create_app(config_path: str = None) -> FastAPI:
                 )
 
         # ── Read Raw Body ──
+        # Bound the body BEFORE buffering it: this runs ahead of the HMAC
+        # check, so the caller is still unauthenticated at this point.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+            logger.warning("Oversized body (%s bytes) from %s", declared, client_ip)
+            raise HTTPException(status_code=413, detail="Payload too large")
         raw_body = await request.body()
+        if len(raw_body) > MAX_BODY_BYTES:
+            logger.warning("Oversized body (%d bytes) from %s", len(raw_body), client_ip)
+            raise HTTPException(status_code=413, detail="Payload too large")
 
         # ── HMAC Signature Validation ──
         hmac_secret = security_config.get("hmac_secret", "")
@@ -1695,12 +1799,12 @@ def create_app(config_path: str = None) -> FastAPI:
 
         Flow: TradingView Alert → AI Agent.decide() → Broker Execution
         """
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = client_ip_of(request, config)
         security_config = config.get("security", {})
 
         # ── FIX 3: HMAC / passphrase authentication (same as /webhook) ──
         allowed_ips = security_config.get("allowed_ips", [])
-        if allowed_ips and client_ip not in allowed_ips:
+        if not ip_allowed(client_ip, allowed_ips):
             logger.warning("AI-webhook rejected from unauthorized IP: %s", client_ip)
             raise HTTPException(status_code=403, detail="IP not allowed")
 
@@ -1710,7 +1814,16 @@ def create_app(config_path: str = None) -> FastAPI:
                 raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
         # ── Parse Payload ──
+        # Bound the body BEFORE buffering it: this runs ahead of the HMAC
+        # check, so the caller is still unauthenticated at this point.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+            logger.warning("Oversized body (%s bytes) from %s", declared, client_ip)
+            raise HTTPException(status_code=413, detail="Payload too large")
         raw_body = await request.body()
+        if len(raw_body) > MAX_BODY_BYTES:
+            logger.warning("Oversized body (%d bytes) from %s", len(raw_body), client_ip)
+            raise HTTPException(status_code=413, detail="Payload too large")
 
         # ── HMAC Signature Validation ──
         hmac_secret = security_config.get("hmac_secret", "")
@@ -1979,7 +2092,28 @@ def create_app(config_path: str = None) -> FastAPI:
 
 
 # ─── Application Instance ───
-app = create_app()
+#
+# Built on first access rather than at import. `app = create_app()` here meant
+# that merely importing this module — which pytest does during collection —
+# read config.yaml from disk, instantiated broker adapters, started the health
+# monitor and enforced the startup guards. PEP 562 module __getattr__ keeps the
+# `webhook_server:app` import string that uvicorn.run() needs working, because
+# uvicorn resolves it with getattr().
+_app_instance: Optional[FastAPI] = None
+
+
+def get_app() -> FastAPI:
+    """Return the singleton application, constructing it on first call."""
+    global _app_instance
+    if _app_instance is None:
+        _app_instance = create_app()
+    return _app_instance
+
+
+def __getattr__(name: str):
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ─── Main Entry Point (with auto-restart + startup notification) ───
@@ -1991,6 +2125,11 @@ if __name__ == "__main__":
     # Loopback unless config.yaml says otherwise — see _default_config().
     host = server_config.get("host", "127.0.0.1")
     port = server_config.get("port", 5000)
+
+    # Bind the lazily-built app to a local name. Module-level __getattr__
+    # resolves `webhook_server.app` for uvicorn's import string, but it does
+    # NOT resolve a bare `app` inside this module — that would NameError.
+    app = get_app()
 
     # Start health monitor background thread
     app.state.health_monitor.start()

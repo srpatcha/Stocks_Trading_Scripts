@@ -7,7 +7,8 @@ import json
 import time
 from unittest.mock import patch, MagicMock
 
-from tradingview.webhooks.webhook_server import app
+# `app` was imported here and never used, and importing it built the
+# entire application as a side effect of test collection.
 
 try:
     from httpx import AsyncClient, ASGITransport
