@@ -5,7 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stocks_plugin"
 version = "0.1.0"
-requires-python = ">=3.9"
+# 3.10 is the floor CI actually verifies (ci.yml/weekly.yml run 3.10-3.12).
+# Nothing has ever been run on 3.9, and alpaca-trend-alert/server.py uses
+# PEP 604 `str | None` in a runtime-evaluated annotation, which 3.9 rejects.
+requires-python = ">=3.10"
 # AGPL-3.0 because the repository vendors AGPL-3.0 (ghostfolio) and GPL-3.0
 # (alpaca-trend-alert) code in-tree. See NOTICE.md.
 license = "AGPL-3.0-only"

@@ -24,10 +24,14 @@ import sys
 import shutil
 from pathlib import Path
 
+# Honour STOCKS_PLUGIN_DATA_DIR like the rest of the system, so setup
+# writes where the runtime will actually read.
+from shared.utils.paths import stocks_plugin_root
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(ROOT, ".env")
 ENV_EXAMPLE = os.path.join(ROOT, ".env.example")
-DATA_DIR = os.path.join(os.path.expanduser("~"), ".stocks_plugin")
+DATA_DIR = stocks_plugin_root()
 
 COLORS = {
     "GREEN": "\033[92m",

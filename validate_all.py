@@ -172,7 +172,17 @@ check("get_status() has all fields", "monthly_pnl" in status and "max_shares_per
 
 # Thread safety
 import threading
-check("_state_lock exists", hasattr(rm, "_state_lock") and isinstance(rm._state_lock, type(threading.Lock())))
+# RLock, not Lock: the read-side gates nest (get_status -> can_trade), so a
+# plain mutex self-deadlocks once they are synchronised. This asserted
+# isinstance(..., type(threading.Lock())) and started failing when the lock
+# was upgraded — check for the lock protocol instead of one concrete type.
+check(
+    "_state_lock exists and is re-entrant",
+    hasattr(rm, "_state_lock")
+    and isinstance(rm._state_lock, type(threading.RLock()))
+    and hasattr(rm._state_lock, "acquire")
+    and hasattr(rm._state_lock, "release"),
+)
 
 # ─── 4. DATA FETCHER ─────────────────────────────────────────────────────
 print("\n📡 4. DATA FETCHER")

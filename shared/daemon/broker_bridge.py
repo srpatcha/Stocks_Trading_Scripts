@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from shared.risk_manager_unified import UnifiedPortfolioRiskGate, UnifiedRiskConfig
-from shared.utils.paths import stocks_plugin_data_dir
+from shared.utils.paths import stocks_plugin_data_dir, stocks_plugin_subdir
 
 logger = logging.getLogger(__name__)
 
@@ -736,7 +736,7 @@ class BrokerBridge:
             # and a function-local import makes the name local to the WHOLE
             # function, so any earlier or later use of os in __init__ raises
             # UnboundLocalError.
-            diary_dir = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "logs")
+            diary_dir = stocks_plugin_subdir("logs")
             os.makedirs(diary_dir, exist_ok=True)
             self._diary_path = os.path.join(diary_dir, "trade_diary.jsonl")
         else:

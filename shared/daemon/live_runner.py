@@ -51,9 +51,10 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from shared.utils.market_hours import MarketHours
+from shared.utils.paths import stocks_plugin_subdir
 
 # Configure logging
-LOG_DIR = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "logs")
+LOG_DIR = stocks_plugin_subdir("logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -108,7 +109,7 @@ class LiveRunner:
 
         # Default paths
         if db_path is None:
-            db_dir = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "data")
+            db_dir = stocks_plugin_subdir("data")
             os.makedirs(db_dir, exist_ok=True)
             db_path = os.path.join(db_dir, "trade_memory.db")
 
@@ -657,7 +658,7 @@ class LiveRunner:
         self._agent.set_data_fetcher(self._data_fetcher, self._symbols)
 
         # GAP #6: Try to load existing saved models first
-        model_dir = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "models")
+        model_dir = stocks_plugin_subdir("models")
         if os.path.isdir(model_dir) and os.listdir(model_dir):
             try:
                 self._agent.load_models(model_dir)
@@ -852,7 +853,7 @@ class LiveRunner:
 
         # Save models
         try:
-            model_dir = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "models")
+            model_dir = stocks_plugin_subdir("models")
             self._agent.save_models(model_dir)
             logger.info("Models saved to %s", model_dir)
 
@@ -888,7 +889,7 @@ class LiveRunner:
                 self._agent._check_retrain_needed()
 
             # 4. Save current state
-            model_dir = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "models")
+            model_dir = stocks_plugin_subdir("models")
             os.makedirs(model_dir, exist_ok=True)
             self._agent.save_models(model_dir)
 

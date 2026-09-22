@@ -26,9 +26,11 @@ from typing import Optional
 
 import pandas as pd
 
+from shared.utils.paths import stocks_plugin_subdir
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DB_DIR = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "cache")
+_DEFAULT_DB_DIR = stocks_plugin_subdir("cache", create=False)
 _DEFAULT_DB_FILE = "market_data.db"
 
 

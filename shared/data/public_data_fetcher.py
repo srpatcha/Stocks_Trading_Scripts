@@ -23,9 +23,11 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from shared.utils.paths import stocks_plugin_subdir
+
 logger = logging.getLogger(__name__)
 
-_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "cache")
+_CACHE_DIR = stocks_plugin_subdir("cache", create=False)
 
 # ─── NYSE market hours (Eastern) ─────────────────────────────────────────────
 _MARKET_OPEN_HOUR_ET = 9

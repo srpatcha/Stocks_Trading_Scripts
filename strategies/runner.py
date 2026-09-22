@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import logging
 import os
 from typing import Any, Dict, Optional
 
@@ -25,13 +26,34 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Import all example strategies to trigger registration
-import strategies.examples.trend_following  # noqa: F401
-import strategies.examples.mean_reversion  # noqa: F401
-import strategies.examples.breakout  # noqa: F401
-import strategies.examples.factor_portfolio  # noqa: F401
-import strategies.examples.ml_rl_strategy  # noqa: F401
-import strategies.examples.self_learning_strategy  # noqa: F401
+logger = logging.getLogger(__name__)
+
+# Import every example strategy so the @register_strategy decorators run.
+#
+# This was a hand-maintained list of six imports, which registered only 7 of
+# the 15 strategies — canslim, darvas_box, earnings, meta_ensemble,
+# sector_rotation, sentiment, triple_screen and value were simply unreachable
+# from this CLI, while the README advertises all 15. Discovery keeps the list
+# from drifting again when a strategy is added.
+def _import_all_example_strategies() -> None:
+    import importlib
+    import pkgutil
+
+    import strategies.examples as _examples
+
+    for module in pkgutil.iter_modules(_examples.__path__):
+        if module.name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"strategies.examples.{module.name}")
+        except Exception as exc:          # optional deps (torch, lightgbm, ...)
+            logger.warning(
+                "Strategy module %r could not be imported and will not be "
+                "listed: %s", module.name, exc,
+            )
+
+
+_import_all_example_strategies()
 
 from strategies import STRATEGY_REGISTRY, list_strategies
 from shared.backtesting.backtest_engine_v2 import BacktestEngineV2, BacktestResultV2

@@ -30,3 +30,19 @@ def stocks_plugin_data_dir(create: bool = True) -> str:
     if create:
         os.makedirs(path, exist_ok=True)
     return path
+
+
+def stocks_plugin_subdir(name: str, create: bool = True) -> str:
+    """Directory for one category of state: models, logs, cache, journal...
+
+    Everything that persists must go through here rather than composing
+    ``expanduser("~") / ".stocks_plugin" / name`` inline. Twelve call sites
+    did the latter, which meant STOCKS_PLUGIN_DATA_DIR could not relocate
+    them — so the test suite read and wrote the operator's real state, and a
+    stray model file in ~/.stocks_plugin/models made LiveRunner._initial_
+    training() skip training entirely and fail two unrelated tests.
+    """
+    path = os.path.join(stocks_plugin_root(), name)
+    if create:
+        os.makedirs(path, exist_ok=True)
+    return path

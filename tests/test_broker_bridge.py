@@ -1015,9 +1015,24 @@ class TestExecuteDecisionDiary:
         bridge._write_diary({"action": "TEST"})
 
     def test_default_diary_path(self):
+        """The diary lands under the configured state root, wherever that is.
+
+        This asserted the literal ".stocks_plugin" was in the path. That
+        directory name is no longer hardcoded — STOCKS_PLUGIN_DATA_DIR
+        relocates it, which is what stops the test suite writing into the
+        operator's real state. Assert the contract (logs/trade_diary.jsonl
+        beneath the active root) rather than one possible spelling of it.
+        """
+        import os
+
+        from shared.utils.paths import stocks_plugin_root
+
         bridge = BrokerBridge(broker="ib", mode="paper")
         bridge._adapter = MockAdapter()
-        assert ".stocks_plugin" in bridge._diary_path
+
+        assert bridge._diary_path.startswith(stocks_plugin_root())
+        assert bridge._diary_path.endswith(
+            os.path.join("logs", "trade_diary.jsonl"))
 
 
 # ── RiskManager wiring ────────────────────────────────────────────────────

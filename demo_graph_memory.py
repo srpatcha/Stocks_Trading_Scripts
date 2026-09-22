@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Generate a sample GraphMemory demo and print the results."""
 import json
+import os
 import sys
-sys.path.insert(0, "/home/spatchava/stocks_plugin")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from shared.ml.graph_memory import GraphMemory
 

@@ -19,6 +19,11 @@ server:
 security:
   hmac_secret: "CHANGE_ME_TO_A_SECURE_SECRET_KEY"
   hmac_algorithm: "sha256"
+  # Stated explicitly. The code already defaults this to true, but the key was
+  # absent here, so the only authentication on the order path was invisible to
+  # anyone reading this file — and a change to that default would have flipped
+  # authentication off silently.
+  require_hmac: true
   # Accepts plain addresses and CIDR ranges. An empty list disables the check.
   allowed_ips:
     - "52.89.214.238"    # TradingView webhook IP

@@ -50,6 +50,7 @@ import pandas as pd
 from shared.data.public_data_fetcher import PublicDataFetcher
 from shared.risk_manager import RiskManager, RiskManagerConfig
 from shared.backtesting.backtest_engine_v2 import BacktestContext
+from shared.utils.paths import stocks_plugin_root
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +60,7 @@ logging.basicConfig(
 logger = logging.getLogger("paper_trader")
 
 PAPER_STATE_FILE = os.path.join(
-    os.path.expanduser("~"), ".stocks_plugin", "paper_trader_state.json"
+    stocks_plugin_root(), "paper_trader_state.json"
 )
 
 DEFAULT_UNIVERSE = [

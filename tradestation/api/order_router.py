@@ -15,6 +15,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 from shared.utils.secret_file import write_secret_file
+from shared.utils.paths import stocks_plugin_root
 
 try:
     from shared.risk_manager import RiskManager  # type: ignore
@@ -401,7 +402,7 @@ class TradeStationOrderRouter:
     def _persist_refresh_token(self) -> None:
         """Persist the current refresh token to disk."""
         try:
-            token_path = Path.home() / ".stocks_plugin" / "ts_refresh_token.txt"
+            token_path = Path(stocks_plugin_root()) / "ts_refresh_token.txt"
             write_secret_file(token_path, self.refresh_token)
             logger.debug("TradeStation refresh token persisted to %s", token_path)
         except Exception as e:

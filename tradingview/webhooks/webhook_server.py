@@ -2138,15 +2138,54 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _parse_args(argv=None):
+    """Parse CLI arguments.
+
+    There was no argument parsing at all, so `--help` was ignored and the
+    server STARTED — binding the port and firing a "Webhook Server Started"
+    alert to Discord/SMS. Asking a program what it does should not deploy it.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="webhook_server",
+        description="TradingView webhook receiver: validates alerts and routes "
+                    "them to the configured broker.",
+    )
+    parser.add_argument("--host", default=None,
+                        help="Bind address (default: server.host from config.yaml)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Bind port (default: server.port from config.yaml)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the resolved configuration and exit without "
+                             "binding a port or sending a startup alert")
+    return parser.parse_args(argv)
+
+
 # ─── Main Entry Point (with auto-restart + startup notification) ───
 if __name__ == "__main__":
     import uvicorn
 
+    args = _parse_args()
+
     config = load_config()
     server_config = config.get("server", {})
     # Loopback unless config.yaml says otherwise — see _default_config().
-    host = server_config.get("host", "127.0.0.1")
-    port = server_config.get("port", 5000)
+    host = args.host if args.host is not None else server_config.get("host", "127.0.0.1")
+    port = args.port if args.port is not None else server_config.get("port", 5000)
+
+    if args.dry_run:
+        security = config.get("security", {})
+        print("DRY RUN — the server will NOT start.")
+        print(f"  bind:            {host}:{port}")
+        # Mirror the defaults the server itself applies, so an absent key
+        # prints the value that will be enforced rather than "None".
+        print(f"  require_hmac:    {security.get('require_hmac', True)}")
+        print(f"  allowed_ips:     {security.get('allowed_ips') or '(any)'}")
+        print(f"  cors_origins:    {security.get('cors_origins') or '(none)'}")
+        print(f"  default_broker:  "
+              f"{config.get('broker_routing', {}).get('default_broker')}")
+        raise SystemExit(0)
 
     # Bind the lazily-built app to a local name. Module-level __getattr__
     # resolves `webhook_server.app` for uvicorn's import string, but it does

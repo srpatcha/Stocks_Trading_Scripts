@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 from shared.utils.trading_clock import trading_day
 
 from shared.utils.secret_file import write_secret_file
+from shared.utils.paths import stocks_plugin_root
 
 # --- RiskManager integration (optional, from shared module) ---
 try:
@@ -252,7 +253,7 @@ class SchwabClient:
     def _persist_refresh_token(self) -> None:
         """Persist the current refresh token to disk."""
         try:
-            token_path = Path.home() / ".stocks_plugin" / "schwab_refresh_token.txt"
+            token_path = Path(stocks_plugin_root()) / "schwab_refresh_token.txt"
             write_secret_file(token_path, self._refresh_token)
             logger.debug("Schwab refresh token persisted to %s", token_path)
         except Exception as e:

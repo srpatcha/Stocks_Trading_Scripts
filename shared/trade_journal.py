@@ -37,9 +37,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from shared.utils.paths import stocks_plugin_subdir
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_JOURNAL_DIR = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "journal")
+_DEFAULT_JOURNAL_DIR = stocks_plugin_subdir("journal", create=False)
 
 
 @dataclass
