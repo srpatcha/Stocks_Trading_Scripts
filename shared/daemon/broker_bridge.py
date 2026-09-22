@@ -37,7 +37,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from shared.risk_manager_unified import UnifiedPortfolioRiskGate
+from shared.risk_manager_unified import UnifiedPortfolioRiskGate, UnifiedRiskConfig
+from shared.utils.paths import stocks_plugin_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -667,7 +668,10 @@ class BrokerBridge:
 
         # Diary path
         if diary_path is None:
-            import os
+            # NB: no local `import os` here — os is imported at module scope,
+            # and a function-local import makes the name local to the WHOLE
+            # function, so any earlier or later use of os in __init__ raises
+            # UnboundLocalError.
             diary_dir = os.path.join(os.path.expanduser("~"), ".stocks_plugin", "logs")
             os.makedirs(diary_dir, exist_ok=True)
             self._diary_path = os.path.join(diary_dir, "trade_diary.jsonl")
@@ -691,8 +695,29 @@ class BrokerBridge:
         # $100k and the per-trade risk limit was never applied on a live path.
         self._risk_manager: Optional[Any] = risk_manager
 
-        # Unified portfolio risk gate (cross-strategy coordination)
-        self._portfolio_gate = UnifiedPortfolioRiskGate.get_instance()
+        # Unified portfolio risk gate (cross-strategy coordination).
+        #
+        # This was get_instance() with no config at all, which meant the only
+        # risk gate on this order path had: no persistence (a crash mid-day
+        # zeroed the daily P&L and every tracked position), a hard-coded
+        # $100,000 equity that ignored the capital= argument above, and a
+        # $10,000 daily loss limit rather than the documented $5,000. Build a
+        # real config from what the caller actually passed.
+        risk_cfg = self._config.get("portfolio_risk", {})
+        default_persist = os.path.join(
+            stocks_plugin_data_dir(), "unified_risk.db",
+        )
+        self._portfolio_gate = UnifiedPortfolioRiskGate.get_instance(
+            UnifiedRiskConfig(
+                account_equity=capital,
+                max_daily_loss=risk_cfg.get("max_daily_loss", 5_000.0),
+                max_portfolio_exposure=risk_cfg.get("max_portfolio_exposure", 0.80),
+                max_single_stock_pct=risk_cfg.get("max_single_stock_pct", 0.15),
+                max_sector_pct=risk_cfg.get("max_sector_pct", 0.30),
+                max_correlated_exposure=risk_cfg.get("max_correlated_exposure", 0.40),
+                persist_path=risk_cfg.get("persist_path", default_persist),
+            )
+        )
 
         # Create adapter
         self._adapter = self._create_adapter()
@@ -793,7 +818,12 @@ class BrokerBridge:
                 )
             notional = shares * price if price > 0 else 0
 
-            gate_ok, gate_reason = self._portfolio_gate.can_open_position(symbol, notional)
+            # reserve() checks the limits AND books the notional under one
+            # lock. can_open_position() released the lock before the order went
+            # out, so concurrent callers all saw the same headroom — 8
+            # concurrent $14k orders were measured landing at 112% of equity
+            # against an 80% cap.
+            gate_ok, gate_reason = self._portfolio_gate.reserve(symbol, notional)
             if not gate_ok:
                 logger.warning(
                     "Portfolio risk gate BLOCKED BUY %s ($%.0f): %s",
@@ -804,13 +834,21 @@ class BrokerBridge:
                     message=f"Portfolio risk gate blocked: {gate_reason}",
                 )
 
-            result = self._adapter.place_market_order(symbol, "BUY", shares)
+            try:
+                result = self._adapter.place_market_order(symbol, "BUY", shares)
+            except Exception:
+                self._portfolio_gate.release_reservation(symbol, notional)
+                raise
+            if not result.success:
+                self._portfolio_gate.release_reservation(symbol, notional)
 
             if result.success:
                 actual_price = getattr(result, 'fill_price', None) or price
                 filled = getattr(result, 'filled_quantity', None) or shares
                 if filled == 0:
                     logger.error("Order filled 0 shares for %s — not opening position", symbol)
+                    # Nothing was opened, so the held headroom must go back.
+                    self._portfolio_gate.release_reservation(symbol, notional)
                     return result
                 if filled < shares:
                     logger.warning("Partial fill: requested %d, filled %d for %s", shares, filled, symbol)
@@ -825,8 +863,8 @@ class BrokerBridge:
                 logger.info("📈 OPENED LONG: %d shares %s @ $%.2f [%s]",
                            filled, symbol, actual_price, self._adapter.name)
 
-                self._portfolio_gate.register_position(
-                    symbol, filled, actual_price, "agent", self._adapter.name,
+                self._portfolio_gate.commit_reservation(
+                    symbol, notional, filled, actual_price, "agent", self._adapter.name,
                 )
 
                 self._place_tp_sl(symbol, actual_price, "long", tp_price, sl_price, filled)
@@ -861,7 +899,12 @@ class BrokerBridge:
                 )
             notional = shares * price if price > 0 else 0
 
-            gate_ok, gate_reason = self._portfolio_gate.can_open_position(symbol, notional)
+            # reserve() checks the limits AND books the notional under one
+            # lock. can_open_position() released the lock before the order went
+            # out, so concurrent callers all saw the same headroom — 8
+            # concurrent $14k orders were measured landing at 112% of equity
+            # against an 80% cap.
+            gate_ok, gate_reason = self._portfolio_gate.reserve(symbol, notional)
             if not gate_ok:
                 logger.warning(
                     "Portfolio risk gate BLOCKED SELL %s ($%.0f): %s",
@@ -872,13 +915,21 @@ class BrokerBridge:
                     message=f"Portfolio risk gate blocked: {gate_reason}",
                 )
 
-            result = self._adapter.place_market_order(symbol, "SELL", shares)
+            try:
+                result = self._adapter.place_market_order(symbol, "SELL", shares)
+            except Exception:
+                self._portfolio_gate.release_reservation(symbol, notional)
+                raise
+            if not result.success:
+                self._portfolio_gate.release_reservation(symbol, notional)
 
             if result.success:
                 actual_price = getattr(result, 'fill_price', None) or price
                 filled = getattr(result, 'filled_quantity', None) or shares
                 if filled == 0:
                     logger.error("Order filled 0 shares for %s — not opening position", symbol)
+                    # Nothing was opened, so the held headroom must go back.
+                    self._portfolio_gate.release_reservation(symbol, notional)
                     return result
                 if filled < shares:
                     logger.warning("Partial fill: requested %d, filled %d for %s", shares, filled, symbol)
@@ -893,8 +944,8 @@ class BrokerBridge:
                 logger.info("📉 OPENED SHORT: %d shares %s @ $%.2f [%s]",
                            filled, symbol, actual_price, self._adapter.name)
 
-                self._portfolio_gate.register_position(
-                    symbol, filled, actual_price, "agent", self._adapter.name,
+                self._portfolio_gate.commit_reservation(
+                    symbol, notional, filled, actual_price, "agent", self._adapter.name,
                 )
 
                 self._place_tp_sl(symbol, actual_price, "short", tp_price, sl_price, filled)

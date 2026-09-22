@@ -16,6 +16,23 @@ if PROJECT_ROOT not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def isolate_persistent_state(tmp_path, monkeypatch):
+    """Give every test its own on-disk state directory.
+
+    Two problems this solves. First, the portfolio risk gate persists to
+    SQLite, so without an override the suite reads and writes the operator's
+    real ~/.stocks_plugin/data/unified_risk.db — observed as a $9,975 position
+    and $3,306 of daily P&L appearing in tests that had opened nothing.
+
+    Second, it has to be per-test rather than per-session: the gate is a
+    singleton, and reset_instance() only drops the Python object. The next
+    construction reloads whatever the previous test wrote, so a shared
+    database leaks state between tests just as effectively as a shared object.
+    """
+    monkeypatch.setenv("STOCKS_PLUGIN_DATA_DIR", str(tmp_path / "state"))
+
+
+@pytest.fixture(autouse=True)
 def neutral_strategy_enricher(request, monkeypatch):
     """Keep StrategyEnricher offline and neutral for the whole suite.
 

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import functools
 import logging
 import sqlite3
 import threading
@@ -28,6 +29,24 @@ from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+def _synchronized(method):
+    """Run ``method`` holding ``self._state_lock``.
+
+    The writers (record_trade, add_position, remove_position) were already
+    locked, but every read-side gate — can_trade, validate_order, get_status,
+    calculate_position_size, check_portfolio_heat, can_pyramid — was not.
+    Worse, can_trade and get_status call _reset_daily_if_needed, which WRITES
+    (`self._daily_pnl = 0.0`); a reset racing record_trade's
+    `self._daily_pnl += pnl` silently lost the update. "Thread-safe" covered
+    the writers only.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
 
 
 class SizingMethod(Enum):
@@ -173,7 +192,10 @@ class RiskManager:
         self._monthly_reset_date: date = self._next_monthly_reset()
 
         # Thread safety — protects ALL mutable state
-        self._state_lock = threading.Lock()
+        # RLock, not Lock: the read-side gates nest (get_status and
+        # validate_order both call can_trade), so a plain mutex would
+        # self-deadlock once they are synchronised.
+        self._state_lock = threading.RLock()
 
         # State persistence
         self._persist_conn: Optional[sqlite3.Connection] = None
@@ -307,6 +329,7 @@ class RiskManager:
 
     # ─── Position Sizing ───
 
+    @_synchronized
     def calculate_position_size(
         self,
         symbol: str,
@@ -437,6 +460,7 @@ class RiskManager:
 
     # ─── Trade Validation ───
 
+    @_synchronized
     def can_trade(self) -> bool:
         """Check all risk gates. Returns True if trading is allowed.
 
@@ -511,6 +535,7 @@ class RiskManager:
 
         return True
 
+    @_synchronized
     def check_portfolio_heat(self, additional_risk: float = 0.0) -> bool:
         """Check if adding a new position would exceed portfolio heat limit.
 
@@ -690,6 +715,7 @@ class RiskManager:
 
     # ─── Status ───
 
+    @_synchronized
     def get_status(self) -> dict:
         """Get current risk manager status.
 
@@ -735,6 +761,7 @@ class RiskManager:
 
     # ─── Production Safety Gates ───
 
+    @_synchronized
     def validate_order(
         self,
         symbol: str,
@@ -869,6 +896,7 @@ class RiskManager:
 
     # ─── Pyramiding (Livermore) ───
 
+    @_synchronized
     def can_pyramid(
         self,
         symbol: str,

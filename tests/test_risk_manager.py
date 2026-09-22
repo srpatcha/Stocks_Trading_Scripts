@@ -541,3 +541,55 @@ class TestGetStatus:
         assert status["total_trades"] == 2
         assert status["current_equity"] == 100100.0
         assert status["consecutive_losses"] == 0
+
+
+class TestReadSideGatesAreSynchronised:
+    """The read-side gates were unlocked while the writers were not.
+
+    can_trade() and get_status() call _reset_daily_if_needed(), which WRITES
+    (`self._daily_pnl = 0.0`). A reset racing record_trade()'s
+    `self._daily_pnl += pnl` silently lost the update, so the daily loss
+    limit could under-count real losses.
+    """
+
+    def test_concurrent_readers_do_not_lose_writer_updates(self):
+        import threading
+
+        rm = RiskManager(config=RiskManagerConfig(
+            total_capital=100_000.0, max_daily_loss=1e9,
+        ))
+        n_threads, per_thread = 8, 300
+
+        def writer():
+            for _ in range(per_thread):
+                rm.record_trade("X", -1.0)
+
+        def reader():
+            for _ in range(per_thread):
+                rm.can_trade()
+                rm.get_status()
+
+        threads = [threading.Thread(target=writer) for _ in range(n_threads)]
+        threads += [threading.Thread(target=reader) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        expected = -1.0 * n_threads * per_thread
+        assert rm.get_status()["daily_pnl"] == pytest.approx(expected)
+
+    def test_nested_gates_do_not_deadlock(self):
+        """get_status -> can_trade and validate_order -> can_trade both nest."""
+        rm = RiskManager(config=RiskManagerConfig(total_capital=100_000.0))
+        rm.get_status()
+        rm.validate_order("AAPL", 10, 150.0, 150.0)
+        rm.can_pyramid("AAPL", 155.0, 150.0)
+        rm.calculate_position_size("AAPL", 150.0, stop_price=145.0)
+        rm.check_portfolio_heat(100.0)
+
+    def test_lock_is_reentrant(self):
+        import threading
+
+        rm = RiskManager(config=RiskManagerConfig(total_capital=100_000.0))
+        assert isinstance(rm._state_lock, type(threading.RLock()))

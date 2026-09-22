@@ -108,11 +108,43 @@ class UnifiedPortfolioRiskGate:
     def get_instance(
         cls, config: Optional[UnifiedRiskConfig] = None
     ) -> "UnifiedPortfolioRiskGate":
-        """Return the singleton instance, creating it if necessary."""
+        """Return the singleton instance, creating it if necessary.
+
+        First caller wins. A config supplied after the instance exists is
+        ignored — which used to happen silently, so a caller passing real
+        limits could quietly get someone else's defaults and never know. Now
+        it is logged loudly whenever the discarded config would actually have
+        changed a limit.
+        """
         if cls._instance is None:
             with cls._init_lock:
                 if cls._instance is None:
                     cls._instance = cls(config or UnifiedRiskConfig())
+                    return cls._instance
+
+        if config is not None:
+            live = cls._instance
+            differences = {
+                name: (getattr(live, attr), supplied)
+                for name, attr, supplied in (
+                    ("account_equity", "_account_equity", config.account_equity),
+                    ("max_daily_loss", "_max_daily_loss", config.max_daily_loss),
+                    ("max_portfolio_exposure", "_max_portfolio_exposure",
+                     config.max_portfolio_exposure),
+                    ("max_single_stock_pct", "_max_single_stock_pct",
+                     config.max_single_stock_pct),
+                    ("max_sector_pct", "_max_sector_pct", config.max_sector_pct),
+                    ("max_correlated_exposure", "_max_correlated_exposure",
+                     config.max_correlated_exposure),
+                )
+                if getattr(live, attr) != supplied
+            }
+            if differences:
+                logger.warning(
+                    "UnifiedPortfolioRiskGate already initialised — the config "
+                    "passed here is IGNORED. Differences (live -> requested): %s",
+                    ", ".join(f"{k}: {a} -> {b}" for k, (a, b) in differences.items()),
+                )
         return cls._instance
 
     @classmethod
@@ -122,6 +154,10 @@ class UnifiedPortfolioRiskGate:
 
     def __init__(self, config: UnifiedRiskConfig) -> None:
         self._positions: Dict[str, PositionInfo] = {}
+        # Notional held by reserve() for orders that are in flight but not yet
+        # confirmed. Counted in _total_exposure so concurrent callers cannot
+        # all pass the same headroom check.
+        self._reserved: Dict[str, float] = {}
         self._total_exposure: float = 0.0
         self._max_portfolio_exposure: float = config.max_portfolio_exposure
         self._max_single_stock_pct: float = config.max_single_stock_pct
@@ -258,6 +294,12 @@ class UnifiedPortfolioRiskGate:
     ) -> Tuple[bool, str]:
         """Check if a new position is allowed across the entire portfolio.
 
+        NOTE: this is a point-in-time check only. It releases the lock before
+        returning, so between this call and ``register_position`` any number of
+        concurrent callers can see the same headroom and all pass — 8
+        concurrent $14k orders were measured landing at 112% of equity against
+        an 80% cap. Use :meth:`reserve` on any path that then places an order.
+
         Args:
             symbol: Ticker symbol.
             notional_value: Dollar value of the proposed position.
@@ -267,70 +309,141 @@ class UnifiedPortfolioRiskGate:
             (allowed, reason) tuple.
         """
         with self._lock:
-            self._reset_daily_if_needed()
+            return self._check_limits_unlocked(symbol, notional_value, sector)
 
-            if sector is None:
-                sector = _SECTOR_MAP.get(symbol, "Unknown")
+    def reserve(
+        self, symbol: str, notional_value: float, sector: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """Atomically check the limits and hold the headroom.
 
-            # Daily loss limit
-            if self._daily_pnl <= -self._max_daily_loss:
-                reason = (
-                    f"Daily loss limit reached: ${self._daily_pnl:.2f} "
-                    f"(max: ${self._max_daily_loss:.2f})"
-                )
-                logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
+        Closes the check-then-act race in ``can_open_position``: the limits are
+        evaluated and the notional is booked against ``_total_exposure`` inside
+        one acquisition of the lock, so concurrent callers see each other's
+        pending orders.
+
+        The caller MUST follow up with exactly one of:
+        - :meth:`commit_reservation` once the broker confirms the fill, or
+        - :meth:`release_reservation` if the order fails or is rejected.
+
+        Returns:
+            (reserved, reason) tuple.
+        """
+        with self._lock:
+            ok, reason = self._check_limits_unlocked(symbol, notional_value, sector)
+            if not ok:
                 return False, reason
-
-            # Total portfolio exposure
-            new_exposure = self._total_exposure + notional_value
-            exposure_pct = new_exposure / self._account_equity if self._account_equity > 0 else 1.0
-            if exposure_pct > self._max_portfolio_exposure:
-                reason = (
-                    f"Portfolio exposure would be {exposure_pct:.1%} "
-                    f"(max: {self._max_portfolio_exposure:.1%})"
-                )
-                logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
-                return False, reason
-
-            # Single stock concentration
-            existing_notional = self._positions[symbol].notional if symbol in self._positions else 0.0
-            stock_total = existing_notional + notional_value
-            stock_pct = stock_total / self._account_equity if self._account_equity > 0 else 1.0
-            if stock_pct > self._max_single_stock_pct:
-                reason = (
-                    f"Single-stock concentration for {symbol} would be {stock_pct:.1%} "
-                    f"(max: {self._max_single_stock_pct:.1%})"
-                )
-                logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
-                return False, reason
-
-            # Sector concentration
-            sector_total = notional_value
-            for pos in self._positions.values():
-                if pos.sector == sector:
-                    sector_total += pos.notional
-            sector_pct = sector_total / self._account_equity if self._account_equity > 0 else 1.0
-            if sector_pct > self._max_sector_pct:
-                reason = (
-                    f"Sector '{sector}' exposure would be {sector_pct:.1%} "
-                    f"(max: {self._max_sector_pct:.1%})"
-                )
-                logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
-                return False, reason
-
-            # Correlation check
-            corr_exposure = self.check_correlation_risk(symbol, set(self._positions.keys()))
-            combined_corr = corr_exposure + notional_value
-            corr_pct = combined_corr / self._account_equity if self._account_equity > 0 else 1.0
-            if corr_pct > self._max_correlated_exposure:
-                reason = (
-                    f"Correlated exposure would be {corr_pct:.1%} "
-                    f"(max: {self._max_correlated_exposure:.1%})"
-                )
-                logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
-                return False, reason
-
+            self._reserved[symbol] = self._reserved.get(symbol, 0.0) + notional_value
+            self._recompute_exposure_unlocked()
+            logger.debug(
+                "UnifiedRisk: reserved $%.0f for %s (total exposure now $%.0f)",
+                notional_value, symbol, self._total_exposure,
+            )
             return True, "OK"
+
+    def release_reservation(self, symbol: str, notional_value: float) -> None:
+        """Give back headroom held by :meth:`reserve` when the order fails."""
+        with self._lock:
+            held = self._reserved.get(symbol, 0.0)
+            give_back = min(held, notional_value)
+            if give_back <= 0:
+                return
+            self._reserved[symbol] = held - give_back
+            if self._reserved[symbol] <= 0:
+                del self._reserved[symbol]
+            self._recompute_exposure_unlocked()
+            logger.debug(
+                "UnifiedRisk: released $%.0f for %s (total exposure now $%.0f)",
+                give_back, symbol, self._total_exposure,
+            )
+
+    def commit_reservation(
+        self,
+        symbol: str,
+        notional_value: float,
+        shares: int,
+        price: float,
+        strategy_name: str,
+        broker_name: str,
+        sector: Optional[str] = None,
+    ) -> None:
+        """Convert a reservation into a tracked position.
+
+        The reserved notional is dropped first so ``register_position`` does
+        not double-count it.
+        """
+        self.release_reservation(symbol, notional_value)
+        self.register_position(
+            symbol, shares, price, strategy_name, broker_name, sector,
+        )
+
+    def _check_limits_unlocked(
+        self, symbol: str, notional_value: float, sector: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """Evaluate every portfolio limit. Caller must hold ``self._lock``."""
+        self._reset_daily_if_needed()
+
+        if sector is None:
+            sector = _SECTOR_MAP.get(symbol, "Unknown")
+
+        # Daily loss limit
+        if self._daily_pnl <= -self._max_daily_loss:
+            reason = (
+                f"Daily loss limit reached: ${self._daily_pnl:.2f} "
+                f"(max: ${self._max_daily_loss:.2f})"
+            )
+            logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
+            return False, reason
+
+        # Total portfolio exposure
+        new_exposure = self._total_exposure + notional_value
+        exposure_pct = new_exposure / self._account_equity if self._account_equity > 0 else 1.0
+        if exposure_pct > self._max_portfolio_exposure:
+            reason = (
+                f"Portfolio exposure would be {exposure_pct:.1%} "
+                f"(max: {self._max_portfolio_exposure:.1%})"
+            )
+            logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
+            return False, reason
+
+        # Single stock concentration
+        existing_notional = self._positions[symbol].notional if symbol in self._positions else 0.0
+        stock_total = existing_notional + notional_value
+        stock_pct = stock_total / self._account_equity if self._account_equity > 0 else 1.0
+        if stock_pct > self._max_single_stock_pct:
+            reason = (
+                f"Single-stock concentration for {symbol} would be {stock_pct:.1%} "
+                f"(max: {self._max_single_stock_pct:.1%})"
+            )
+            logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
+            return False, reason
+
+        # Sector concentration
+        sector_total = notional_value
+        for pos in self._positions.values():
+            if pos.sector == sector:
+                sector_total += pos.notional
+        sector_pct = sector_total / self._account_equity if self._account_equity > 0 else 1.0
+        if sector_pct > self._max_sector_pct:
+            reason = (
+                f"Sector '{sector}' exposure would be {sector_pct:.1%} "
+                f"(max: {self._max_sector_pct:.1%})"
+            )
+            logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
+            return False, reason
+
+        # Correlation check
+        corr_exposure = self.check_correlation_risk(symbol, set(self._positions.keys()))
+        combined_corr = corr_exposure + notional_value
+        corr_pct = combined_corr / self._account_equity if self._account_equity > 0 else 1.0
+        if corr_pct > self._max_correlated_exposure:
+            reason = (
+                f"Correlated exposure would be {corr_pct:.1%} "
+                f"(max: {self._max_correlated_exposure:.1%})"
+            )
+            logger.warning("UnifiedRisk BLOCKED %s: %s", symbol, reason)
+            return False, reason
+
+        return True, "OK"
 
     def register_position(
         self,
@@ -342,6 +455,13 @@ class UnifiedPortfolioRiskGate:
         sector: Optional[str] = None,
     ) -> None:
         """Register a position from any strategy/broker.
+
+        Adding to an existing position accumulates rather than replacing it.
+        This used to overwrite ``_positions[symbol]`` outright, so five
+        registrations of 100 shares left 100 tracked against 500 actually
+        bought — while ``can_open_position`` accumulated (``existing_notional +
+        notional_value``). The check and the bookkeeping disagreed, and the
+        bookkeeping was the one that understated risk.
 
         Args:
             symbol: Ticker symbol.
@@ -357,16 +477,35 @@ class UnifiedPortfolioRiskGate:
         notional = abs(shares * price)
 
         with self._lock:
-            self._positions[symbol] = PositionInfo(
-                symbol=symbol,
-                shares=shares,
-                entry_price=price,
-                notional=notional,
-                strategy=strategy_name,
-                broker=broker_name,
-                sector=sector,
-            )
-            self._total_exposure = sum(p.notional for p in self._positions.values())
+            existing = self._positions.get(symbol)
+            if existing is not None and (existing.shares > 0) == (shares > 0):
+                total_shares = existing.shares + shares
+                # Share-weighted average entry, so P&L on exit is right.
+                blended = (
+                    (existing.entry_price * abs(existing.shares) + price * abs(shares))
+                    / abs(total_shares)
+                ) if total_shares else price
+                self._positions[symbol] = PositionInfo(
+                    symbol=symbol,
+                    shares=total_shares,
+                    entry_price=blended,
+                    notional=existing.notional + notional,
+                    strategy=existing.strategy,
+                    broker=existing.broker,
+                    sector=existing.sector,
+                    opened_at=existing.opened_at,
+                )
+            else:
+                self._positions[symbol] = PositionInfo(
+                    symbol=symbol,
+                    shares=shares,
+                    entry_price=price,
+                    notional=notional,
+                    strategy=strategy_name,
+                    broker=broker_name,
+                    sector=sector,
+                )
+            self._recompute_exposure_unlocked()
 
         logger.info(
             "UnifiedRisk: registered %s %d shares @ $%.2f ($%.0f) [%s/%s]",
@@ -374,21 +513,52 @@ class UnifiedPortfolioRiskGate:
         )
         self._save_state()
 
-    def close_position(self, symbol: str, pnl: float) -> None:
-        """Record a position close and update P&L.
+    def _recompute_exposure_unlocked(self) -> None:
+        """Recompute total exposure from positions plus in-flight reservations."""
+        self._total_exposure = (
+            sum(p.notional for p in self._positions.values())
+            + sum(self._reserved.values())
+        )
+
+    def close_position(
+        self, symbol: str, pnl: float, shares: Optional[int] = None
+    ) -> None:
+        """Record a position close (full or partial) and update P&L.
 
         Args:
             symbol: Ticker symbol.
-            pnl: Realized P&L of the closed position.
+            pnl: Realized P&L of the closed portion.
+            shares: Number of shares closed. ``None`` closes the whole
+                position. Passing a partial amount previously still deleted
+                the entry outright, dropping 100% of the tracked exposure for
+                a position that was only partly exited.
         """
         with self._lock:
             self._reset_daily_if_needed()
             self._daily_pnl += pnl
             self._account_equity += pnl
 
-            if symbol in self._positions:
-                del self._positions[symbol]
-                self._total_exposure = sum(p.notional for p in self._positions.values())
+            pos = self._positions.get(symbol)
+            if pos is not None:
+                closing = abs(shares) if shares else abs(pos.shares)
+                if closing >= abs(pos.shares):
+                    del self._positions[symbol]
+                else:
+                    remaining = abs(pos.shares) - closing
+                    sign = 1 if pos.shares > 0 else -1
+                    # Notional scales with the shares still held; entry price
+                    # is unchanged by a partial exit.
+                    self._positions[symbol] = PositionInfo(
+                        symbol=pos.symbol,
+                        shares=sign * remaining,
+                        entry_price=pos.entry_price,
+                        notional=pos.notional * (remaining / abs(pos.shares)),
+                        strategy=pos.strategy,
+                        broker=pos.broker,
+                        sector=pos.sector,
+                        opened_at=pos.opened_at,
+                    )
+                self._recompute_exposure_unlocked()
 
         logger.info(
             "UnifiedRisk: closed %s | P&L=$%.2f | Daily P&L=$%.2f | Remaining positions=%d",
