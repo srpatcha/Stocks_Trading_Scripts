@@ -23,6 +23,10 @@ from shared.risk_manager import (
     SizingMethod,
     TradeRecord,
 )
+# trading_day(), not date.today(): the reset logic measures the session
+# at the exchange, so on a UTC host the host date is a day ahead and
+# stamping state with it looks like a brand new trading day.
+from shared.utils.trading_clock import trading_day
 
 
 # ── Fixtures ──
@@ -282,25 +286,25 @@ class TestCanTrade:
     def test_daily_loss_limit_blocks(self, custom_rm):
         """Validates can_trade returns False when daily loss exceeds limit."""
         custom_rm._daily_pnl = -1000.0
-        custom_rm._daily_pnl_date = date.today()
+        custom_rm._daily_pnl_date = trading_day()
         assert custom_rm.can_trade() is False
 
     def test_daily_loss_at_exact_limit_blocks(self, custom_rm):
         """Validates can_trade blocks at exactly the loss limit (<=)."""
         custom_rm._daily_pnl = -1000.0
-        custom_rm._daily_pnl_date = date.today()
+        custom_rm._daily_pnl_date = trading_day()
         assert custom_rm.can_trade() is False
 
     def test_daily_loss_just_under_limit_allows(self, custom_rm):
         """Validates can_trade allows when just under the daily loss limit."""
         custom_rm._daily_pnl = -999.99
-        custom_rm._daily_pnl_date = date.today()
+        custom_rm._daily_pnl_date = trading_day()
         assert custom_rm.can_trade() is True
 
     def test_profitable_day_not_blocked(self, custom_rm):
         """BUG FIX VERIFICATION: Profitable daily P&L should NOT block trading."""
         custom_rm._daily_pnl = 5000.0
-        custom_rm._daily_pnl_date = date.today()
+        custom_rm._daily_pnl_date = trading_day()
         assert custom_rm.can_trade() is True
 
     def test_cooldown_blocks_trading(self, custom_rm):
@@ -474,13 +478,13 @@ class TestDailyReset:
         default_rm._reset_daily_if_needed()
         assert default_rm._daily_pnl == 0.0
         assert default_rm._daily_trade_count == 0
-        assert default_rm._daily_pnl_date == date.today()
+        assert default_rm._daily_pnl_date == trading_day()
 
     def test_no_reset_same_day(self, default_rm):
         """Validates counters are NOT reset on the same day."""
         default_rm._daily_pnl = -1000.0
         default_rm._daily_trade_count = 5
-        default_rm._daily_pnl_date = date.today()
+        default_rm._daily_pnl_date = trading_day()
         default_rm._reset_daily_if_needed()
         assert default_rm._daily_pnl == -1000.0
         assert default_rm._daily_trade_count == 5

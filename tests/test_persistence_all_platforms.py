@@ -25,6 +25,11 @@ if PROJECT_ROOT not in sys.path:
 
 from shared.risk_manager import RiskManager, RiskManagerConfig
 
+# trading_day(), not date.today(): the reset logic measures the session
+# at the exchange, so on a UTC host the host date is a day ahead and
+# stamping state with it looks like a brand new trading day.
+from shared.utils.trading_clock import trading_day
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Helpers
@@ -169,7 +174,7 @@ class TestSchwabNewDayResets:
 
         # Manually set date to yesterday in DB
         conn = sqlite3.connect(schwab_db)
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (trading_day() - timedelta(days=1)).isoformat()
         conn.execute(
             "UPDATE schwab_risk_state SET value = ? WHERE key = 'daily_pnl_date'",
             (json.dumps(yesterday),),

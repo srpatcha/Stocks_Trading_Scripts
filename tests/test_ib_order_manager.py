@@ -20,6 +20,10 @@ from interactive_brokers.utils.order_manager import (
     OrderStatus,
     RiskConfig,
 )
+# trading_day(), not date.today(): the reset logic measures the session
+# at the exchange, so on a UTC host the host date is a day ahead and
+# stamping state with it looks like a brand new trading day.
+from shared.utils.trading_clock import trading_day
 
 
 # ── Fixtures ──
@@ -313,24 +317,24 @@ class TestModifyOrder:
 class TestCheckDailyLoss:
     def test_daily_loss_not_exceeded_allows_trade(self, default_manager):
         default_manager._daily_pnl = -100.0
-        default_manager._daily_pnl_date = date.today()
+        default_manager._daily_pnl_date = trading_day()
         default_manager._check_daily_loss()  # should not raise
 
     def test_daily_loss_exceeded_blocks_trade(self, default_manager):
         default_manager._daily_pnl = -5000.0
-        default_manager._daily_pnl_date = date.today()
+        default_manager._daily_pnl_date = trading_day()
         with pytest.raises(ValueError, match="Daily loss limit reached"):
             default_manager._check_daily_loss()
 
     def test_profitable_day_not_blocked(self, default_manager):
         """Verify fix: profitable days NOT blocked by _check_daily_loss."""
         default_manager._daily_pnl = 5000.0
-        default_manager._daily_pnl_date = date.today()
+        default_manager._daily_pnl_date = trading_day()
         default_manager._check_daily_loss()  # must NOT raise
 
     def test_zero_pnl_not_blocked(self, default_manager):
         default_manager._daily_pnl = 0.0
-        default_manager._daily_pnl_date = date.today()
+        default_manager._daily_pnl_date = trading_day()
         default_manager._check_daily_loss()  # must NOT raise
 
     def test_daily_pnl_resets_on_new_day(self, default_manager):
@@ -338,7 +342,7 @@ class TestCheckDailyLoss:
         default_manager._daily_pnl_date = date(2000, 1, 1)
         default_manager._check_daily_loss()  # should reset and pass
         assert default_manager._daily_pnl == 0.0
-        assert default_manager._daily_pnl_date == date.today()
+        assert default_manager._daily_pnl_date == trading_day()
 
 
 # ── _track_order / UUID Fallback Tests ──
