@@ -1066,3 +1066,106 @@ class TestOnFillReleasesExposure:
         bridge.reconcile_positions()
 
         assert bridge._portfolio_gate.get_portfolio_summary()["total_exposure"] == pytest.approx(0.0)
+
+
+# ── Real fill prices reach P&L ────────────────────────────────────────────
+
+class TestFillPricesAreUsed:
+    """No adapter ever populated fill_price, so every P&L used the decision
+    price and slippage was invisible. Adapters now expose get_fill()."""
+
+    class _FillingAdapter(MockAdapter):
+        """Fills 3% away from the requested price — visible slippage."""
+
+        def __init__(self, slip=1.03, qty=None):
+            super().__init__()
+            self._slip = slip
+            self._qty = qty
+
+        def get_fill(self, order_id):
+            last = self._orders[-1]
+            price = (last.get("price") or 100.0) * self._slip
+            return price, (self._qty if self._qty is not None else last["qty"])
+
+    def test_open_records_the_fill_price_not_the_decision_price(self):
+        a = self._FillingAdapter(slip=1.03)
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+
+        bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 100.0}, "AAPL")
+
+        pos = bridge.get_positions()["AAPL"]
+        assert pos.entry_price == pytest.approx(103.0), "slippage was discarded"
+
+    def test_partial_fill_quantity_is_respected(self):
+        a = self._FillingAdapter(slip=1.0, qty=7)
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+
+        bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 100.0}, "AAPL")
+
+        assert bridge.get_positions()["AAPL"].shares == 7
+
+    def test_execution_result_carries_the_fill_back(self):
+        a = self._FillingAdapter(slip=1.02)
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+
+        result = bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 100.0}, "AAPL")
+
+        assert result.fill_price == pytest.approx(102.0)
+        assert result.filled_quantity is not None
+
+    def test_falls_back_to_the_decision_price_when_broker_cannot_say(self):
+        a = MockAdapter()  # base get_fill() returns None
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+
+        bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 100.0}, "AAPL")
+
+        assert bridge.get_positions()["AAPL"].entry_price == pytest.approx(100.0)
+
+    def test_a_broken_adapter_does_not_crash_the_order_path(self):
+        """This runs after the order is live — it must degrade, never raise."""
+        class BadAdapter(MockAdapter):
+            def get_fill(self, order_id):
+                return ("not-a-price",)
+
+        a = BadAdapter()
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+
+        result = bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 100.0}, "AAPL")
+
+        assert result.success
+        assert bridge.get_positions()["AAPL"].entry_price == pytest.approx(100.0)
+
+    def test_adapter_raising_does_not_crash_the_order_path(self):
+        class ThrowingAdapter(MockAdapter):
+            def get_fill(self, order_id):
+                raise RuntimeError("broker unreachable")
+
+        a = ThrowingAdapter()
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+
+        result = bridge.execute_decision(
+            {"action": "BUY", "confidence": 0.9, "price": 100.0}, "AAPL")
+        assert result.success
+
+    def test_close_uses_the_exit_fill_price(self):
+        a = self._FillingAdapter(slip=1.0)
+        a._prices["AAPL"] = 100.0
+        bridge = _make_bridge(adapter=a)
+        bridge._positions["AAPL"] = Position("AAPL", "long", 10, 100.0, "t")
+
+        # Exit fills 10% better than the quoted exit.
+        a._slip = 1.10
+        bridge._close_position("AAPL", 100.0)
+
+        assert "AAPL" not in bridge.get_positions()

@@ -43,6 +43,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+from shared.utils.trading_clock import trading_day
+
 from shared.utils.secret_file import write_secret_file
 
 # --- RiskManager integration (optional, from shared module) ---
@@ -113,7 +115,7 @@ class SchwabClient:
         # Daily P&L tracking
         self._daily_pnl: float = 0.0
         self._max_daily_loss: float = max_daily_loss
-        self._daily_pnl_date: date = date.today()
+        self._daily_pnl_date: date = trading_day()
         self._consecutive_losses: int = 0
         self._cooldown_until: float = 0.0
 
@@ -193,7 +195,7 @@ class SchwabClient:
         saved_date_str = state.get("daily_pnl_date")
         if saved_date_str:
             saved_date = date.fromisoformat(saved_date_str)
-            if saved_date == date.today():
+            if saved_date == trading_day():
                 self._daily_pnl = float(state.get("daily_pnl", 0.0))
                 self._daily_pnl_date = saved_date
             else:

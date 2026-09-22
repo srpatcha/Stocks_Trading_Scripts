@@ -30,6 +30,8 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+from shared.utils.trading_clock import trading_day
+
 def _synchronized(method):
     """Run ``method`` holding ``self._state_lock``.
 
@@ -162,7 +164,7 @@ class RiskManager:
 
         # Daily tracking
         self._daily_pnl: float = 0.0
-        self._daily_pnl_date: date = date.today()
+        self._daily_pnl_date: date = trading_day()
         self._daily_trade_count: int = 0
 
         # Consecutive loss tracking
@@ -276,7 +278,7 @@ class RiskManager:
         saved_date_str = state.get("daily_pnl_date")
         if saved_date_str:
             saved_date = date.fromisoformat(saved_date_str)
-            if saved_date == date.today():
+            if saved_date == trading_day():
                 self._daily_pnl = float(state.get("daily_pnl", 0.0))
                 self._daily_trade_count = int(state.get("daily_trade_count", 0))
                 self._daily_pnl_date = saved_date
@@ -318,14 +320,14 @@ class RiskManager:
 
     def _reset_daily_if_needed(self) -> None:
         """Reset daily counters if a new day has started."""
-        if self._daily_pnl_date != date.today():
+        if self._daily_pnl_date != trading_day():
             logger.info(
                 "New day — resetting daily counters. Previous day P&L: $%.2f",
                 self._daily_pnl,
             )
             self._daily_pnl = 0.0
             self._daily_trade_count = 0
-            self._daily_pnl_date = date.today()
+            self._daily_pnl_date = trading_day()
 
     # ─── Position Sizing ───
 
@@ -995,7 +997,7 @@ class RiskManager:
         ValueError when monthly_reset_day > days in month (e.g., 31 in Feb).
         """
         import calendar
-        today = date.today()
+        today = trading_day()
         reset_day = self.config.monthly_reset_day
         if today.day >= reset_day:
             # Next month
@@ -1011,7 +1013,7 @@ class RiskManager:
 
     def _reset_monthly_if_needed(self) -> None:
         """Reset monthly P&L counter if the reset date has passed."""
-        today = date.today()
+        today = trading_day()
         if today >= self._monthly_reset_date:
             logger.info(
                 "Monthly reset — previous month P&L: $%.2f",

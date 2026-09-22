@@ -1129,27 +1129,49 @@ def _check_risk_gates(
             quantity, alert.price, trade_value, max_trade_value, capped_qty)
         alert.quantity = capped_qty
 
-    # GAP 12: Sector exposure limit
+    # GAP 12: Sector exposure limit, measured in dollars.
+    #
+    # This counted POSITIONS, not exposure: with one Technology position open,
+    # sector_count/total_positions was 100% and the second tech trade was
+    # refused outright, while a single enormous position in one sector passed
+    # freely. max_sector_pct is a share of capital, so compare dollars.
     sector = SECTOR_MAP.get(alert.symbol.upper(), "Unknown")
     if alert.action.lower() in ("buy", "long"):
-        sector_positions = getattr(app.state, "sector_tracker", {})
-        total_positions = sum(sector_positions.values()) if sector_positions else 0
-        sector_count = sector_positions.get(sector, 0)
         max_sector_pct = app.state.config.get(
             "risk_management", {}).get("max_sector_pct", 30.0)
-        if total_positions > 0 and (sector_count / total_positions * 100) > max_sector_pct:
+        sector_exposure = getattr(app.state, "sector_exposure", {})
+        capital = float(app.state.config.get(
+            "risk_management", {}).get("starting_equity", 0.0)) or None
+
+        proposed = quantity * alert.price
+        sector_total = sector_exposure.get(sector, 0.0) + proposed
+
+        # The denominator must be capital, not the book's own size. Using
+        # total exposure makes the first position 100% of the book and blocks
+        # everything — the same defect as the old position-count version, just
+        # denominated in dollars. With no configured capital the limit has no
+        # meaning, so skip it rather than block.
+        basis = capital
+        if not basis:
+            if not getattr(app.state, "_warned_no_sector_basis", False):
+                logger.warning(
+                    "risk_management.starting_equity is not set — the sector "
+                    "concentration limit cannot be evaluated and is not enforced"
+                )
+                app.state._warned_no_sector_basis = True
+        elif (sector_total / basis * 100) > max_sector_pct:
             logger.warning(
-                "BLOCKED by sector limit: %s has %d/%d positions (%.1f%% > %.1f%%)",
-                sector, sector_count, total_positions,
-                sector_count / total_positions * 100, max_sector_pct,
+                "BLOCKED by sector limit: %s at $%.0f of $%.0f (%.1f%% > %.1f%%)",
+                sector, sector_total, basis,
+                sector_total / basis * 100, max_sector_pct,
             )
             return JSONResponse(status_code=200, content={
                 "status": "blocked",
                 "reason": "sector_concentration",
                 "sector": sector,
-                "sector_positions": sector_count,
-                "total_positions": total_positions,
-                "sector_pct": round(sector_count / total_positions * 100, 1),
+                "sector_exposure": round(sector_total, 2),
+                "basis": round(basis, 2),
+                "sector_pct": round(sector_total / basis * 100, 1),
                 "max_sector_pct": max_sector_pct,
             })
 
@@ -1318,6 +1340,10 @@ def create_app(config_path: str = None) -> FastAPI:
     app.state.total_alerts = 0
     app.state.broker_router = BrokerRouter(config)
     app.state.sector_tracker: Dict[str, int] = defaultdict(int)
+    # Dollar exposure per sector. max_sector_pct is a share of capital,
+    # so the limit has to be measured in dollars; the count above is kept
+    # only for the position tally reported by /status.
+    app.state.sector_exposure: Dict[str, float] = defaultdict(float)
 
     rate_config = config.get("rate_limiting", {})
     app.state.rate_limiter = RateLimiter(
@@ -1594,12 +1620,19 @@ def create_app(config_path: str = None) -> FastAPI:
         app.state.total_alerts += 1
         app.state.health_monitor.record_alert()
 
-        # Track sector exposure (GAP 12)
+        # Track sector exposure (GAP 12) — both the count and the dollars.
         sector = SECTOR_MAP.get(alert.symbol.upper(), "Unknown")
+        notional = quantity * alert.price
         if alert.action.lower() in ("buy", "long"):
             app.state.sector_tracker[sector] = app.state.sector_tracker.get(sector, 0) + 1
+            app.state.sector_exposure[sector] = (
+                app.state.sector_exposure.get(sector, 0.0) + notional
+            )
         elif alert.action.lower() in ("sell", "close"):
             app.state.sector_tracker[sector] = max(0, app.state.sector_tracker.get(sector, 0) - 1)
+            app.state.sector_exposure[sector] = max(
+                0.0, app.state.sector_exposure.get(sector, 0.0) - notional
+            )
 
         # ── Dispatch Notifications ──
         if app.state.alert_dispatcher:
@@ -1908,7 +1941,8 @@ def create_app(config_path: str = None) -> FastAPI:
                 "daily_trade_count": app.state.pnl_tracker.trade_count,
                 "daily_loss_limit_ok": app.state.pnl_tracker.can_trade(),
                 "drawdown": app.state.drawdown_breaker.get_status(),
-                "sector_exposure": dict(app.state.sector_tracker),
+                "sector_positions": dict(app.state.sector_tracker),
+                "sector_exposure_usd": dict(app.state.sector_exposure),
                 "open_positions": app.state.position_ledger.get_open_symbols(),
             },
             "latency": app.state.health_monitor.get_latency_stats(),

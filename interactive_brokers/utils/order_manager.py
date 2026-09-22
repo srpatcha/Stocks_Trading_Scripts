@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+from shared.utils.trading_clock import trading_day
+
 
 class OrderSide(Enum):
     BUY = "BUY"
@@ -39,6 +41,20 @@ class OrderState(Enum):
     INACTIVE = "Inactive"
     API_PENDING = "ApiPending"
     API_CANCELLED = "ApiCancelled"
+
+
+# ib_async reports order state as a plain string. Map it onto OrderState so
+# sync_orders() can mark terminal orders and stop counting them as open.
+_IB_STATUS_MAP = {
+    "PendingSubmit": OrderState.PENDING,
+    "ApiPending": OrderState.API_PENDING,
+    "PreSubmitted": OrderState.PRE_SUBMITTED,
+    "Submitted": OrderState.SUBMITTED,
+    "Filled": OrderState.FILLED,
+    "Cancelled": OrderState.CANCELLED,
+    "ApiCancelled": OrderState.API_CANCELLED,
+    "Inactive": OrderState.INACTIVE,
+}
 
 
 @dataclass
@@ -104,8 +120,10 @@ class OrderManager:
         self.connection = connection
         self.notifier = notifier
         self._orders: Dict[int, OrderStatus] = {}
+        # order_id -> live ib_async Trade, used by sync_orders().
+        self._trades: Dict[int, Any] = {}
         self._daily_pnl: float = 0.0
-        self._daily_pnl_date: date = date.today()
+        self._daily_pnl_date: date = trading_day()
         self._loss_streak: int = 0
         self._cooldown_until: float = 0.0
 
@@ -227,14 +245,29 @@ class OrderManager:
         self._check_daily_loss()
         self._check_cooldown()
 
-        if estimated_price is not None:
-            order_value = quantity * estimated_price
+        # The notional cap was gated behind `estimated_price is not None`,
+        # and market_order()/trailing_stop_order() pass no price — so the cap
+        # never applied to exactly the orders whose cost is unknown up front.
+        # Fall back to a live quote; refuse only if we cannot price it at all.
+        price = estimated_price
+        if price is None:
+            price = self._estimate_price(symbol)
+        if price is not None:
+            order_value = quantity * price
             if order_value > self.risk_config.max_order_value:
                 raise ValueError(
                     f"Order value ${order_value:,.2f} exceeds max "
                     f"${self.risk_config.max_order_value:,.2f}"
                 )
+        else:
+            logger.warning(
+                "No price available for %s — max_order_value not enforced "
+                "for this order", symbol,
+            )
 
+        # Reconcile first: without this, filled orders were still counted as
+        # open and the account locked itself out after max_open_orders.
+        self.sync_orders()
         open_count = len(self.get_open_orders())
         if open_count >= self.risk_config.max_open_orders:
             raise ValueError(
@@ -262,9 +295,9 @@ class OrderManager:
         Raises:
             ValueError: If daily loss limit is exceeded.
         """
-        if self._daily_pnl_date != date.today():
+        if self._daily_pnl_date != trading_day():
             self._daily_pnl = 0.0
-            self._daily_pnl_date = date.today()
+            self._daily_pnl_date = trading_day()
 
         if self._daily_pnl <= -self.risk_config.max_daily_loss:
             raise ValueError(
@@ -291,6 +324,10 @@ class OrderManager:
             parent_id=parent_id,
         )
         self._orders[order_id] = status
+        # Keep the live Trade object so sync_orders() can read the real fill
+        # back off it. Nothing used to update OrderStatus after submission, so
+        # every order stayed PENDING forever (see sync_orders).
+        self._trades[order_id] = trade
         logger.info(
             "Order tracked: %s %s %.0f %s @ %s [id=%d]",
             action, symbol, quantity, order_type,
@@ -559,6 +596,86 @@ class OrderManager:
             logger.error("Failed to modify order %d: %s", order_id, e)
             return False
 
+
+    def _estimate_price(self, symbol: str) -> Optional[float]:
+        """Best-effort last price, used to apply the notional cap.
+
+        Returns None when no quote is reachable; the caller decides what to do
+        with that rather than silently skipping the limit.
+        """
+        getter = getattr(self.connection, "get_latest_price", None)
+        if getter is None:
+            return None
+        try:
+            price = float(getter(symbol))
+        except Exception as e:
+            logger.debug("Price lookup failed for %s: %s", symbol, e)
+            return None
+        return price if price > 0 else None
+
+    def sync_orders(self) -> int:
+        """Refresh tracked orders from their live broker state.
+
+        Nothing previously updated OrderStatus after submission: every order
+        stayed PENDING, `is_active` stayed True, and once max_open_orders
+        filled orders had accumulated the account locked itself out of placing
+        anything further — including the market orders used to exit and the
+        stops used to protect. Only cancel_order() ever changed a status.
+
+        Returns:
+            Number of orders whose status changed.
+        """
+        changed = 0
+        for order_id, status in list(self._orders.items()):
+            trade = self._trades.get(order_id)
+            if trade is None:
+                continue
+            ib_status = getattr(trade, "orderStatus", None)
+            if ib_status is None:
+                continue
+
+            filled = float(getattr(ib_status, "filled", 0.0) or 0.0)
+            avg_price = float(getattr(ib_status, "avgFillPrice", 0.0) or 0.0)
+            raw_state = str(getattr(ib_status, "status", "") or "")
+
+            new_state = _IB_STATUS_MAP.get(raw_state)
+            if new_state is None and filled >= status.quantity > 0:
+                new_state = OrderState.FILLED
+
+            updated = False
+            if filled != status.filled_quantity:
+                status.filled_quantity = filled
+                updated = True
+            if avg_price and avg_price != status.avg_fill_price:
+                status.avg_fill_price = avg_price
+                updated = True
+            if new_state is not None and new_state != status.status:
+                status.status = new_state
+                if new_state == OrderState.FILLED and status.filled_at is None:
+                    status.filled_at = datetime.now()
+                updated = True
+
+            if updated:
+                changed += 1
+            if not status.is_active:
+                # Terminal: stop holding the broker object.
+                self._trades.pop(order_id, None)
+
+        if changed:
+            logger.debug("sync_orders: %d order(s) updated", changed)
+        return changed
+
+    def get_fill(self, order_id: int) -> Optional[tuple]:
+        """Return ``(avg_fill_price, filled_quantity)`` for a filled order.
+
+        Returns None when the order is unknown or nothing has filled yet.
+        """
+        self.sync_orders()
+        status = self._orders.get(int(order_id))
+        if status is None or status.filled_quantity <= 0:
+            return None
+        return status.avg_fill_price, status.filled_quantity
+
     def get_open_orders(self) -> List[OrderStatus]:
         """Get all currently active/open orders.
 
@@ -643,7 +760,7 @@ class OrderManager:
         Args:
             pnl: Current daily realized P&L.
         """
-        if self._daily_pnl_date != date.today():
+        if self._daily_pnl_date != trading_day():
             self._daily_pnl = 0.0
-            self._daily_pnl_date = date.today()
+            self._daily_pnl_date = trading_day()
         self._daily_pnl = pnl

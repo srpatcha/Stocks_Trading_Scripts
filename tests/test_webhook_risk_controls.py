@@ -26,6 +26,7 @@ from tradingview.webhooks.webhook_server import (
     MAX_ORDER_QUANTITY,
     StaleAlertError,
     _check_alert_freshness,
+    _check_risk_gates,
     _update_risk_controls,
     HealthMonitor,
     DailyPnLTracker,
@@ -710,3 +711,69 @@ class TestAlertFreshness:
         _check_alert_freshness(self._iso(-100_000), 0, True)
         _check_alert_freshness(None, 0, True)
         _check_alert_freshness("garbage", 0, True)
+
+
+class TestSectorLimitMeasuresDollars:
+    """max_sector_pct is a share of capital, so it must count dollars.
+
+    It counted POSITIONS: with one Technology position open,
+    sector_count/total_positions was 100% and the second tech trade was
+    refused outright, while a single enormous position in one sector passed
+    freely.
+    """
+
+    def _app(self, equity=100_000.0, max_sector_pct=30.0):
+        app = MagicMock()
+        app.state.config = {
+            "risk_management": {
+                "max_trade_value": 1e12,
+                "max_sector_pct": max_sector_pct,
+                "starting_equity": equity,
+            }
+        }
+        app.state.sector_exposure = {}
+        app.state.pnl_tracker = DailyPnLTracker(max_daily_loss=1e9)
+        app.state.cooldown_mgr = CooldownManager()
+        app.state.drawdown_breaker = DrawdownCircuitBreaker()
+        return app
+
+    def _alert(self, symbol="AAPL", price=100.0, qty=100.0):
+        return AlertPayload(symbol=symbol, action="buy", price=price, quantity=qty)
+
+    def test_first_position_in_a_sector_is_not_blocked(self):
+        """The old version made the first position 100% of the sector."""
+        app = self._app()
+        assert _check_risk_gates(app, self._alert(qty=10.0), 10.0) is None
+
+    def test_second_position_in_a_sector_is_allowed_under_the_cap(self):
+        app = self._app()
+        app.state.sector_exposure = {"Technology": 5_000.0}
+        assert _check_risk_gates(app, self._alert(qty=10.0), 10.0) is None
+
+    def test_sector_blocked_once_dollars_exceed_the_cap(self):
+        app = self._app(equity=100_000.0, max_sector_pct=30.0)
+        app.state.sector_exposure = {"Technology": 28_000.0}
+        # +$5,000 => $33,000 = 33% > 30%
+        resp = _check_risk_gates(app, self._alert(qty=50.0), 50.0)
+        assert resp is not None
+        assert json.loads(resp.body.decode())["reason"] == "sector_concentration"
+
+    def test_one_huge_position_is_caught(self):
+        """Position counting let a single oversized position straight through."""
+        app = self._app(equity=100_000.0, max_sector_pct=30.0)
+        resp = _check_risk_gates(app, self._alert(price=1_000.0, qty=50.0), 50.0)
+        assert resp is not None
+        assert json.loads(resp.body.decode())["reason"] == "sector_concentration"
+
+    def test_other_sectors_are_unaffected(self):
+        app = self._app()
+        app.state.sector_exposure = {"Technology": 90_000.0}
+        # XOM is Energy, not Technology.
+        assert _check_risk_gates(
+            app, self._alert(symbol="XOM", qty=10.0), 10.0) is None
+
+    def test_limit_is_skipped_when_capital_is_unknown(self):
+        """No capital configured means no denominator — warn, do not block."""
+        app = self._app(equity=0.0)
+        app.state._warned_no_sector_basis = False
+        assert _check_risk_gates(app, self._alert(qty=10_000.0), 10_000.0) is None

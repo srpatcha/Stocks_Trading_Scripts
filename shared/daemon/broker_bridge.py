@@ -162,6 +162,16 @@ class BaseBrokerAdapter(ABC):
             message="stop orders unsupported by this adapter; no protective order placed",
         )
 
+    def get_fill(self, order_id: str) -> Optional[tuple]:
+        """Return ``(avg_fill_price, filled_quantity)``, or None if unknown.
+
+        No adapter used to implement this, so ExecutionResult.fill_price and
+        .filled_quantity were always None and every P&L in the diary, in agent
+        memory and in the portfolio gate was computed from the *decision*
+        price. Slippage and partial fills were invisible.
+        """
+        return None
+
     @abstractmethod
     def cancel_order(self, order_id: str) -> bool: ...
 
@@ -292,6 +302,15 @@ class IBAdapter(BaseBrokerAdapter):
         except Exception as e:
             logger.error("IB market order failed: %s", e)
             return ExecutionResult(False, self.name, symbol, action, quantity, 0, message=str(e))
+
+    def get_fill(self, order_id: str) -> Optional[tuple]:
+        if not self._order_manager:
+            return None
+        try:
+            return self._order_manager.get_fill(int(order_id))
+        except Exception as e:
+            logger.debug("IB fill lookup failed for %s: %s", order_id, e)
+            return None
 
     def place_limit_order(self, symbol: str, action: str, quantity: int, price: float) -> ExecutionResult:
         if not self._order_manager:
@@ -424,6 +443,26 @@ class TradeStationAdapter(BaseBrokerAdapter):
         except Exception as e:
             return ExecutionResult(False, self.name, symbol, action, quantity, 0, message=str(e))
 
+    def get_fill(self, order_id: str) -> Optional[tuple]:
+        if not self._router:
+            return None
+        try:
+            data = self._router.get_order_status(self._account_id, order_id) or {}
+        except Exception as e:
+            logger.debug("TS fill lookup failed for %s: %s", order_id, e)
+            return None
+        orders = data.get("Orders") or [data]
+        for o in orders:
+            filled = o.get("FilledQuantity") or o.get("filled_quantity")
+            price = (o.get("FilledPrice") or o.get("AverageFilledPrice")
+                     or o.get("ExecutionPrice"))
+            if filled and price:
+                try:
+                    return float(price), int(float(filled))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
     def place_limit_order(self, symbol: str, action: str, quantity: int, price: float) -> ExecutionResult:
         if not self._router:
             return ExecutionResult(False, self.name, symbol, action, quantity, price, message="Not connected")
@@ -537,6 +576,31 @@ class SchwabAdapter(BaseBrokerAdapter):
             return ExecutionResult(True, self.name, symbol, action, quantity, 0, order_id=order_id)
         except Exception as e:
             return ExecutionResult(False, self.name, symbol, action, quantity, 0, message=str(e))
+
+    def get_fill(self, order_id: str) -> Optional[tuple]:
+        if not self._client:
+            return None
+        try:
+            orders = self._client.get_orders(status="FILLED") or []
+        except Exception as e:
+            logger.debug("Schwab fill lookup failed for %s: %s", order_id, e)
+            return None
+        for o in orders:
+            if str(o.get("orderId")) != str(order_id):
+                continue
+            filled = o.get("filledQuantity")
+            legs = o.get("orderActivityCollection") or []
+            prices = [
+                float(leg["executionPrice"])
+                for act in legs
+                for leg in (act.get("executionLegs") or [])
+                if leg.get("executionPrice")
+            ]
+            if filled and prices:
+                return sum(prices) / len(prices), int(float(filled))
+            if filled and o.get("price"):
+                return float(o["price"]), int(float(filled))
+        return None
 
     def place_limit_order(self, symbol: str, action: str, quantity: int, price: float) -> ExecutionResult:
         if not self._client:
@@ -843,8 +907,7 @@ class BrokerBridge:
                 self._portfolio_gate.release_reservation(symbol, notional)
 
             if result.success:
-                actual_price = getattr(result, 'fill_price', None) or price
-                filled = getattr(result, 'filled_quantity', None) or shares
+                actual_price, filled = self._resolve_fill(result, price, shares)
                 if filled == 0:
                     logger.error("Order filled 0 shares for %s — not opening position", symbol)
                     # Nothing was opened, so the held headroom must go back.
@@ -924,8 +987,7 @@ class BrokerBridge:
                 self._portfolio_gate.release_reservation(symbol, notional)
 
             if result.success:
-                actual_price = getattr(result, 'fill_price', None) or price
-                filled = getattr(result, 'filled_quantity', None) or shares
+                actual_price, filled = self._resolve_fill(result, price, shares)
                 if filled == 0:
                     logger.error("Order filled 0 shares for %s — not opening position", symbol)
                     # Nothing was opened, so the held headroom must go back.
@@ -982,8 +1044,7 @@ class BrokerBridge:
         result = self._adapter.place_market_order(symbol, close_action, pos.shares)
 
         if result.success:
-            # FIX 1: Use fill price from close result, not decision price
-            actual_exit = getattr(result, 'fill_price', None) or exit_price
+            actual_exit, _ = self._resolve_fill(result, exit_price, pos.shares)
 
             # Calculate P&L
             if pos.direction == "long":
@@ -1021,6 +1082,59 @@ class BrokerBridge:
             self._portfolio_gate.close_position(symbol, pnl)
 
         return result
+
+    def _resolve_fill(self, result: ExecutionResult, fallback_price: float,
+                      requested_shares: int) -> tuple:
+        """Return the real (price, quantity) for a placed order.
+
+        ``getattr(result, 'fill_price', None) or price`` always resolved to
+        the decision price because no adapter ever populated fill_price, so
+        every downstream P&L was computed against a price the trade never got.
+        Ask the adapter; fall back only when the broker cannot tell us.
+        """
+        price = getattr(result, "fill_price", None)
+        qty = getattr(result, "filled_quantity", None)
+
+        if price is None or qty is None:
+            try:
+                fill = self._adapter.get_fill(result.order_id)
+            except Exception as e:
+                logger.debug("Fill lookup failed for %s: %s", result.order_id, e)
+                fill = None
+            # Defensive: this runs AFTER the order is live, so a malformed
+            # adapter response must degrade to the fallback, never raise.
+            fetched_price = fetched_qty = None
+            try:
+                if fill is not None:
+                    fetched_price, fetched_qty = fill
+                    fetched_price = float(fetched_price)
+                    fetched_qty = int(fetched_qty)
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "Adapter returned an unusable fill for %s: %r (%s)",
+                    result.order_id or "?", fill, e,
+                )
+                fetched_price = fetched_qty = None
+
+            if fetched_price is not None and price is None:
+                price = fetched_price
+                result.fill_price = price
+            if fetched_qty is not None and qty is None:
+                qty = fetched_qty
+                result.filled_quantity = qty
+
+        if price is None or price <= 0:
+            logger.warning(
+                "No fill price available for %s order %s — using the decision "
+                "price $%.2f; realized P&L will not include slippage",
+                result.symbol, result.order_id or "?", fallback_price,
+            )
+            price = fallback_price
+        try:
+            qty = requested_shares if qty is None else int(qty)
+        except (TypeError, ValueError):
+            qty = requested_shares
+        return float(price), qty
 
     def _calculate_shares(self, price: float, stop_price: Optional[float] = None) -> int:
         """Calculate position size based on capital and limits.

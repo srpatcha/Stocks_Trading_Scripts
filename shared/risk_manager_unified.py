@@ -37,6 +37,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+from shared.utils.trading_clock import trading_day
+
 
 @dataclass
 class PositionInfo:
@@ -164,7 +166,7 @@ class UnifiedPortfolioRiskGate:
         self._max_sector_pct: float = config.max_sector_pct
         self._max_correlated_exposure: float = config.max_correlated_exposure
         self._daily_pnl: float = 0.0
-        self._daily_pnl_date: date = date.today()
+        self._daily_pnl_date: date = trading_day()
         self._max_daily_loss: float = config.max_daily_loss
         self._account_equity: float = config.account_equity
         self._lock = threading.Lock()
@@ -253,12 +255,12 @@ class UnifiedPortfolioRiskGate:
         state = {key: json.loads(value) for key, value in rows}
 
         saved_date_str = state.get("daily_pnl_date")
-        if saved_date_str and date.fromisoformat(saved_date_str) == date.today():
+        if saved_date_str and date.fromisoformat(saved_date_str) == trading_day():
             self._daily_pnl = float(state.get("daily_pnl", 0.0))
         else:
             self._daily_pnl = 0.0
 
-        self._daily_pnl_date = date.today()
+        self._daily_pnl_date = trading_day()
         self._account_equity = float(state.get("account_equity", self._account_equity))
         self._total_exposure = float(state.get("total_exposure", 0.0))
 
@@ -284,10 +286,10 @@ class UnifiedPortfolioRiskGate:
     # ─── Risk Gates ───
 
     def _reset_daily_if_needed(self) -> None:
-        if self._daily_pnl_date != date.today():
+        if self._daily_pnl_date != trading_day():
             logger.info("UnifiedRisk: new day — resetting daily P&L (was $%.2f)", self._daily_pnl)
             self._daily_pnl = 0.0
-            self._daily_pnl_date = date.today()
+            self._daily_pnl_date = trading_day()
 
     def can_open_position(
         self, symbol: str, notional_value: float, sector: Optional[str] = None
