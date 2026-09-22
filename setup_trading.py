@@ -13,9 +13,11 @@ One-command setup that:
 7. Prints system readiness report
 
 Usage:
-    python setup_trading.py
+    python setup_trading.py            # run the full setup
+    python setup_trading.py --dry-run  # show what it would do
 """
 
+import argparse
 import os
 import subprocess
 import sys
@@ -63,6 +65,13 @@ def install_dependencies():
         ("vaderSentiment", "Sentiment analysis (VADER)"),
         ("feedparser", "Google News RSS fallback"),
         ("lightgbm", "Regime classifier (ML)"),
+        # Not optional alongside lightgbm: regime_classifier.py and
+        # feature_engineer.py use lgb.LGBMClassifier / lgb.LGBMRegressor, which
+        # live in lightgbm.sklearn and raise
+        #   LightGBMError: scikit-learn is required for lightgbm.sklearn
+        # without it. Installing lightgbm alone left the regime classifier
+        # broken for anyone who followed the README.
+        ("scikit-learn", "Required by lightgbm.sklearn (regime classifier)"),
     ]
 
     # Core (required)
@@ -291,10 +300,42 @@ def run_self_test():
 
 # ─── Main ─────────────────────────────────────────────────────────────────
 
-def main():
+def main(argv=None):
+    # This script pip-installs packages, writes .env and creates directories
+    # under ~/.stocks_plugin. It had no argument parsing at all, so
+    # `setup_trading.py --help` — the first thing anyone types before running
+    # an unfamiliar script — silently performed all of it.
+    parser = argparse.ArgumentParser(
+        description=(
+            "One-command setup: installs dependencies, writes a .env template, "
+            "creates data directories, validates imports and strategies, and "
+            "tests Yahoo Finance connectivity."
+        ),
+        epilog=(
+            "Writes to: ./.env (never overwritten) and "
+            "~/.stocks_plugin/. Installs packages with pip into the active "
+            "environment."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be done without installing or writing anything.",
+    )
+    args = parser.parse_args(argv)
+
     cprint("=" * 60, "BOLD")
     cprint("  TRADING SYSTEM SETUP", "BOLD")
     cprint("=" * 60, "BOLD")
+
+    if args.dry_run:
+        cprint("\nDRY RUN — nothing will be installed or written.\n", "YELLOW")
+        print("Would install (core):     pandas, numpy, yfinance")
+        print("Would install (optional): vaderSentiment, feedparser, lightgbm,")
+        print("                          scikit-learn")
+        print(f"Would create .env at:     {ENV_FILE}")
+        print(f"Would create data dir:    {DATA_DIR}")
+        print("Would then validate imports, strategies and data connectivity.")
+        return 0
 
     results = {
         "Dependencies": install_dependencies(),

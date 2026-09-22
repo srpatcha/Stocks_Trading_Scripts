@@ -1,9 +1,9 @@
 # Stocks Trading — Scripts & Plugins
 
-[![CI](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/ci.yml/badge.svg)](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/codeql.yml/badge.svg)](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/codeql.yml)
-[![Scorecard](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/scorecard.yml/badge.svg)](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/scorecard.yml)
-[![Book](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/book-build.yml/badge.svg)](https://github.com/embeddedos-org/eStocks_Trading_Scripts/actions/workflows/book-build.yml)
+[![CI](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/ci.yml/badge.svg)](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/codeql.yml/badge.svg)](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/codeql.yml)
+[![Scorecard](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/scorecard.yml/badge.svg)](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/scorecard.yml)
+[![Book](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/book-build.yml/badge.svg)](https://github.com/srpatcha/Stocks_Trading_Scripts/actions/workflows/book-build.yml)
 
 A comprehensive algorithmic trading system with **15 strategies**, **7 data sources**, **7-layer risk management**, and production safety controls. 2,190+ tests passing on Python 3.12.
 
@@ -68,7 +68,7 @@ stocks_plugin/
 │   ├── strategy_enricher.py      ← Multi-source data enrichment for all strategies
 │   ├── trade_journal.py          ← Human psychology/discipline journal
 │   ├── data/public_data_fetcher.py ← OHLCV, fundamentals, news, earnings
-│   ├── indicators/               ← 35+ indicators, 14 candlestick patterns
+│   ├── indicators/               ← 35+ indicators, 13 candlestick patterns
 │   ├── backtesting/              ← Multi-asset backtester with R-multiples/SQN
 │   └── ml/                       ← Sentiment, regime, ensemble, LSTM, RL
 ├── strategies/examples/          ← 15 registered strategies
@@ -387,7 +387,8 @@ Tools for gathering market data, tracking portfolio performance, and generating 
 
 2. **Install Python dependencies** (for IB, TradeStation API, and webhook scripts):
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements-core.txt   # required, version-bounded
+   pip install -r requirements.txt        # core + all optional extras
    ```
 
 3. **Configure API credentials:**
@@ -425,7 +426,17 @@ Tools for gathering market data, tracking portfolio performance, and generating 
 
 ## License
 
-This project is for personal/educational use. Trading involves risk — scripts provided here are not financial advice. Use at your own discretion with proper risk management.
+Licensed under the **GNU Affero General Public License v3.0** — see
+[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+
+AGPL-3.0 applies because this repository vendors AGPL-3.0 (Ghostfolio) and
+GPL-3.0 (alpaca-trend-alert) code in-tree. Note that **network use counts as
+distribution**: if you run the webhook server or dashboard where others can
+reach it, those users may request the source. Running it privately for
+yourself triggers no obligation.
+
+Trading involves risk. Nothing here is financial advice — use at your own
+discretion with proper risk management.
 
 ---
 
