@@ -170,8 +170,12 @@ class TestCheckCooldown:
     """Tests for the _check_cooldown validation method."""
 
     def test_no_cooldown_does_not_raise(self, custom_om):
-        # Should not raise
-        custom_om._check_cooldown()
+        custom_om._check_cooldown()   # nothing set: allowed
+
+        # And the gate is reachable, so the above is not vacuous.
+        custom_om._cooldown_until = time.time() + 600
+        with pytest.raises(ValueError):
+            custom_om._check_cooldown()
 
     def test_active_cooldown_raises(self, custom_om):
         custom_om._cooldown_until = time.time() + 3600
@@ -180,9 +184,12 @@ class TestCheckCooldown:
             custom_om._check_cooldown()
 
     def test_expired_cooldown_does_not_raise(self, custom_om):
-        custom_om._cooldown_until = time.time() - 10  # expired 10s ago
-        # Should not raise
+        custom_om._cooldown_until = time.time() - 10   # expired 10s ago
         custom_om._check_cooldown()
+
+        custom_om._cooldown_until = time.time() + 10   # 10s still to run
+        with pytest.raises(ValueError):
+            custom_om._check_cooldown()
 
 
 # ─── Integration: _validate_order with cooldown ───
@@ -192,8 +199,15 @@ class TestValidateOrderWithCooldown:
     """Tests that _validate_order includes cooldown checks."""
 
     def test_validate_passes_normally(self, custom_om):
-        # Should not raise with valid parameters
         custom_om._validate_order("AAPL", "BUY", 100, estimated_price=150.0)
+
+        # An order far beyond the size cap must still be refused, so a passing
+        # validation means something.
+        with pytest.raises(ValueError):
+            custom_om._validate_order(
+                "AAPL", "BUY", custom_om.risk_config.max_position_size + 1,
+                estimated_price=150.0,
+            )
 
     def test_validate_rejects_during_cooldown(self, custom_om):
         custom_om._cooldown_until = time.time() + 3600

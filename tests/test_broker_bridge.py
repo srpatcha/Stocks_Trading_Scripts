@@ -280,7 +280,14 @@ class TestPlaceTpSl:
         adapter = FailTPAdapter()
         bridge = _make_bridge(adapter=adapter)
         bridge._positions["X"] = Position("X", "long", 10, 100.0, "t")
+
         bridge._place_tp_sl("X", 100.0, "long")
+
+        # The docstring says "SL still placed" — so assert it, rather than
+        # only that nothing raised. A missing stop is the dangerous outcome.
+        stops = [o for o in adapter._orders if o["type"] == "stop"]
+        assert len(stops) == 1, "TP failure took the protective stop with it"
+        assert bridge._oco_pairs == {}, "an OCO pair was linked with no TP"
 
     def test_sl_failure_handled(self):
         """SL stop order fails, no crash."""
@@ -291,7 +298,13 @@ class TestPlaceTpSl:
         adapter = FailSLAdapter()
         bridge = _make_bridge(adapter=adapter)
         bridge._positions["X"] = Position("X", "long", 10, 100.0, "t")
-        bridge._place_tp_sl("X", 100.0, "long")
+
+        with patch.object(bridge, "_notify_unprotected_position") as notify:
+            bridge._place_tp_sl("X", 100.0, "long")
+
+        # A position left without a stop must be escalated, not swallowed.
+        notify.assert_called_once()
+        assert not [o for o in adapter._orders if o["type"] == "stop"]
 
 
 # ── execute_decision ─────────────────────────────────────────────────────
@@ -685,11 +698,23 @@ class TestOCOPairs:
         bridge = _make_bridge(adapter=adapter)
         bridge._oco_pairs["X"] = "Y"
         bridge._oco_pairs["Y"] = "X"
+
         bridge._cancel_paired_order("X")
 
+        # Both sides are dropped even though the broker call failed —
+        # otherwise a stale pair would try to cancel forever.
+        assert "X" not in bridge._oco_pairs
+        assert "Y" not in bridge._oco_pairs
+
     def test_cancel_no_paired(self):
-        bridge = _make_bridge()
+        adapter = MockAdapter()
+        bridge = _make_bridge(adapter=adapter)
+        bridge._oco_pairs["A"] = "B"
+
         bridge._cancel_paired_order("NONEXISTENT")
+
+        # An unknown id must not disturb unrelated pairs or call the broker.
+        assert bridge._oco_pairs == {"A": "B"}
 
 
 # ── on_fill callback ────────────────────────────────────────────────────

@@ -542,8 +542,13 @@ class TestPositionTracking:
         assert "AAPL" not in default_rm._open_positions
 
     def test_remove_nonexistent_position_no_error(self, default_rm):
-        """Validates removing a non-existent symbol does not raise."""
+        """Removing an unknown symbol must be a no-op, not just non-raising."""
+        default_rm.add_position("AAPL", 500.0)
+
         default_rm.remove_position("NONEXISTENT")
+
+        assert default_rm.get_status()["open_positions"] == 1
+        assert default_rm.get_status()["portfolio_heat_pct"] > 0
 
 
 # ── get_status() ──

@@ -315,10 +315,19 @@ class TestModifyOrder:
 
 
 class TestCheckDailyLoss:
+    # Each of these paired the allow case with the block case. On its own,
+    # "does not raise" also passes if the gate is deleted.
+
     def test_daily_loss_not_exceeded_allows_trade(self, default_manager):
         default_manager._daily_pnl = -100.0
         default_manager._daily_pnl_date = trading_day()
-        default_manager._check_daily_loss()  # should not raise
+
+        default_manager._check_daily_loss()   # small loss: allowed
+
+        # The gate is live: past the configured limit it refuses.
+        default_manager._daily_pnl = -(default_manager.risk_config.max_daily_loss + 1)
+        with pytest.raises(ValueError):
+            default_manager._check_daily_loss()  # should not raise
 
     def test_daily_loss_exceeded_blocks_trade(self, default_manager):
         default_manager._daily_pnl = -5000.0
@@ -327,15 +336,25 @@ class TestCheckDailyLoss:
             default_manager._check_daily_loss()
 
     def test_profitable_day_not_blocked(self, default_manager):
-        """Verify fix: profitable days NOT blocked by _check_daily_loss."""
+        """A sign error here would halt trading on a WINNING day."""
         default_manager._daily_pnl = 5000.0
         default_manager._daily_pnl_date = trading_day()
-        default_manager._check_daily_loss()  # must NOT raise
+
+        default_manager._check_daily_loss()
+
+        # Same magnitude, opposite sign, must block — proving the check reads
+        # the sign rather than the magnitude.
+        default_manager._daily_pnl = -5000.0
+        with pytest.raises(ValueError):
+            default_manager._check_daily_loss()  # must NOT raise
 
     def test_zero_pnl_not_blocked(self, default_manager):
         default_manager._daily_pnl = 0.0
         default_manager._daily_pnl_date = trading_day()
-        default_manager._check_daily_loss()  # must NOT raise
+
+        default_manager._check_daily_loss()
+
+        assert default_manager._daily_pnl == 0.0, "the check mutated state"  # must NOT raise
 
     def test_daily_pnl_resets_on_new_day(self, default_manager):
         default_manager._daily_pnl = -9999.0
@@ -430,8 +449,12 @@ class TestNotify:
         mock_notifier.error.assert_called_once_with("err msg")
 
     def test_notify_handles_exception(self, manager_with_notifier, mock_notifier):
+        """A broken notifier must not propagate into the order path."""
         mock_notifier.info.side_effect = RuntimeError("boom")
-        manager_with_notifier._notify("test")  # should not raise
+
+        manager_with_notifier._notify("test")
+
+        mock_notifier.info.assert_called_once()   # the failing path really ran  # should not raise
 
 
 # ── Risk Checks ──
@@ -458,7 +481,13 @@ class TestRiskChecks:
 
     def test_cooldown_expired_allows_trading(self, default_manager):
         default_manager._cooldown_until = time.time() - 1
-        default_manager._check_cooldown()  # should not raise
+
+        default_manager._check_cooldown()   # expired: allowed
+
+        # Still live: an unexpired cooldown refuses.
+        default_manager._cooldown_until = time.time() + 600
+        with pytest.raises(ValueError, match="[Cc]ooldown"):
+            default_manager._check_cooldown()  # should not raise
 
     def test_validate_order_max_open_orders(self, mock_connection):
         mgr = OrderManager(mock_connection, config={"max_open_orders": 2})

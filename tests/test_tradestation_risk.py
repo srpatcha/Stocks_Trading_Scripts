@@ -127,10 +127,21 @@ class TestAccountMonitorDrawdown:
 
 class TestOrderRouterChecksMonitor:
 
+    # "Should not raise" is a real assertion for a gate that raises to block —
+    # but on its own it also passes if the gate is deleted. Each of these now
+    # pairs the allow case with the block case, so the test can only pass if
+    # the gate is actually live.
+
     def test_pre_order_passes_without_monitor(self):
         router = _make_router()
-        # Should not raise
-        router._pre_order_checks("AAPL")
+        router._pre_order_checks("AAPL")  # no monitor attached: nothing to block
+
+        # ...and the gate is genuinely wired: a blocking monitor stops it.
+        monitor = MagicMock()
+        monitor.is_trading_blocked.return_value = (True, "halted")
+        blocked = _make_router(account_monitor=monitor)
+        with pytest.raises(TradingBlockedError):
+            blocked._pre_order_checks("AAPL")
 
     def test_pre_order_blocked_by_monitor(self):
         monitor = MagicMock()
@@ -143,7 +154,10 @@ class TestOrderRouterChecksMonitor:
         monitor = MagicMock()
         monitor.is_trading_blocked.return_value = (False, "")
         router = _make_router(account_monitor=monitor)
-        router._pre_order_checks("AAPL")  # should not raise
+
+        router._pre_order_checks("AAPL")
+
+        monitor.is_trading_blocked.assert_called(), "the monitor was never consulted"  # should not raise
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -242,7 +256,13 @@ class TestMaxPositionCount:
         router = _make_router(max_positions=3)
         router.add_position("AAPL")
         router.add_position("MSFT")
-        router._pre_order_checks("GOOG")  # should not raise
+
+        router._pre_order_checks("GOOG")   # third slot is free
+
+        # The ceiling is real: once GOOG is taken, a fourth symbol is refused.
+        router.add_position("GOOG")
+        with pytest.raises(TradingBlockedError, match="max open positions"):
+            router._pre_order_checks("TSLA")  # should not raise
 
     def test_blocks_at_max_new_symbol(self):
         router = _make_router(max_positions=2)
@@ -252,18 +272,26 @@ class TestMaxPositionCount:
             router._pre_order_checks("GOOG")
 
     def test_allows_existing_symbol_at_max(self):
+        """Adding to a held name takes no new slot; a new name does."""
         router = _make_router(max_positions=2)
         router.add_position("AAPL")
         router.add_position("MSFT")
-        # Adding to existing position should be allowed
-        router._pre_order_checks("AAPL")  # should not raise
+
+        router._pre_order_checks("AAPL")   # already held — allowed at the cap
+
+        with pytest.raises(TradingBlockedError):
+            router._pre_order_checks("GOOG")   # new name at the cap — refused  # should not raise
 
     def test_remove_position_allows_new(self):
         router = _make_router(max_positions=2)
         router.add_position("AAPL")
         router.add_position("MSFT")
+
+        with pytest.raises(TradingBlockedError):
+            router._pre_order_checks("GOOG")   # full
+
         router.remove_position("MSFT")
-        router._pre_order_checks("GOOG")  # should not raise
+        router._pre_order_checks("GOOG")       # a slot freed up  # should not raise
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -97,8 +97,13 @@ class TestCreateTables:
         assert "idx_model_perf_model" in indexes
 
     def test_create_tables_idempotent(self, memory):
-        # Calling again should not crash
+        """Re-creating tables must preserve existing rows, not just not crash."""
+        memory.record_trade(_make_trade())
+        before = memory.get_trade_count()
+
         memory._create_tables()
+
+        assert memory.get_trade_count() == before, "re-creating tables lost data"
 
 
 # ─── record_trade() ───
@@ -429,6 +434,11 @@ class TestCloseAndRepr:
 
     def test_close_no_error(self, tmp_db):
         mem = TradeMemory(db_path=tmp_db)
+        mem.record_trade(_make_trade())
+
+        mem.close()
+
+        # Closing twice must stay safe — __del__ calls it again.
         mem.close()
 
     def test_db_file_created(self, tmp_db):
