@@ -118,3 +118,41 @@ def backtest_engine(synthetic_ohlcv_df):
     engine = BacktestEngineV2(initial_capital=100_000)
     engine.load_data(synthetic_ohlcv_df)
     return engine
+
+
+def pytest_configure(config):
+    """Warn loudly when this machine can segfault mid-run.
+
+    On macOS, LightGBM and PyTorch bundle separate OpenMP runtimes and crash
+    the interpreter when both are used in one process (measured in both
+    orders — see shared/__init__.py). That takes the whole pytest run down
+    with no traceback and no report for anything after it.
+
+    This warns rather than skipping: the crash is not confined to a list of
+    test names that can be enumerated reliably, so pretending to know which
+    ones are affected would be worse than saying plainly that the environment
+    is unsound. Uninstall one of the two locally, or run on Linux/CI, to get a
+    complete result.
+    """
+    import sys
+    from importlib.util import find_spec
+
+    if sys.platform != "darwin":
+        return
+    try:
+        if find_spec("lightgbm") is None or find_spec("torch") is None:
+            return
+    except (ImportError, ValueError):       # pragma: no cover
+        return
+
+    config.stash  # noqa: B018 - touch to keep the reference explicit
+    sys.stderr.write(
+        "\n"
+        "=" * 78 + "\n"
+        "WARNING: LightGBM and PyTorch are both installed on macOS.\n"
+        "They bundle separate OpenMP runtimes and SEGFAULT when used in one\n"
+        "process, which will abort this run partway through with no report.\n"
+        "Uninstall one of them locally, or run the suite on Linux/CI, for a\n"
+        "complete result. See shared/__init__.py for the measurements.\n"
+        + "=" * 78 + "\n\n"
+    )

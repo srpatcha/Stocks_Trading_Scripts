@@ -87,15 +87,38 @@ class TestHasBTGuard:
 # ═══════════════════════════════════════════════════════
 
 def _make_mock_strategy_result(equity, dates, trades):
+    """Build a stand-in whose analyzers behave like backtrader's.
+
+    This used to stub `analyzers.getbytype()` — a method backtrader's
+    ItemCollection does not have. MagicMock answers any attribute, so the
+    fake satisfied the production code's call and every test passed, while
+    the real API raised AttributeError on the first line of the conversion.
+    The adapter's run_backtest() could never complete.
+
+    The fake now exposes getitems(), which is the real API, and returns an
+    actual BacktestResultAnalyzer instance so the isinstance lookup is
+    exercised rather than mocked away.
+    """
+    from backtrader_adapter.analyzers import BacktestResultAnalyzer
+
     mock_analysis = {
         "equity_curve": equity,
         "dates": dates,
         "trades": trades,
     }
-    mock_analyzer = MagicMock()
-    mock_analyzer.get_analysis.return_value = mock_analysis
+
+    if BacktestResultAnalyzer is None:          # backtrader not installed
+        analyzer = MagicMock()
+    else:
+        analyzer = MagicMock(spec=BacktestResultAnalyzer)
+        analyzer.__class__ = BacktestResultAnalyzer
+    analyzer.get_analysis.return_value = mock_analysis
+
     mock_result = MagicMock()
-    mock_result.analyzers.getbytype.return_value = [mock_analyzer]
+    # Real backtrader yields (name, analyzer) pairs — mirror that exactly,
+    # so the fake cannot drift from the API again.
+    mock_result.analyzers.getitems.return_value = [
+        ("backtestresultanalyzer", analyzer)]
     return mock_result
 
 
@@ -154,7 +177,7 @@ class TestToBacktestResultV2:
         if not _HAS_ENGINE or not _HAS_BT:
             pytest.skip("backtrader or BacktestResultV2 not available")
         mock_result = MagicMock()
-        mock_result.analyzers.getbytype.return_value = []
+        mock_result.analyzers.getitems.return_value = []
         with pytest.raises(ValueError, match="BacktestResultAnalyzer not found"):
             to_backtest_result_v2(mock_result)
 

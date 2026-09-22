@@ -71,6 +71,40 @@ else:
     BacktestResultAnalyzer = None  # type: ignore[assignment,misc]
 
 
+def _find_result_analyzer(analyzers):
+    """Locate the BacktestResultAnalyzer on a strategy's analyzer collection.
+
+    backtrader's ItemCollection.getitems() yields ``(name, analyzer)`` PAIRS,
+    not bare analyzers, and the collection itself is iterable via
+    __getitem__/__len__. Both shapes are handled so this does not depend on
+    which backtrader version is installed.
+
+    Returns the analyzer, or None when it was never registered.
+    """
+    if BacktestResultAnalyzer is None:
+        return None
+
+    candidates = []
+    getitems = getattr(analyzers, "getitems", None)
+    if callable(getitems):
+        for entry in getitems():
+            # (name, analyzer) in real backtrader; a bare analyzer elsewhere.
+            if isinstance(entry, tuple) and len(entry) == 2:
+                candidates.append(entry[1])
+            else:
+                candidates.append(entry)
+    else:
+        try:
+            candidates = list(analyzers)
+        except TypeError:
+            candidates = []
+
+    for candidate in candidates:
+        if isinstance(candidate, BacktestResultAnalyzer):
+            return candidate
+    return None
+
+
 def to_backtest_result_v2(
     strategy_result,
     initial_capital: float = 100_000.0,
@@ -89,11 +123,22 @@ def to_backtest_result_v2(
     if not _HAS_BT:
         raise ImportError("backtrader is required for to_backtest_result_v2")
 
-    analyzer = strategy_result.analyzers.getbytype(BacktestResultAnalyzer)
-    if not analyzer:
-        raise ValueError("BacktestResultAnalyzer not found. Add it via cerebro.addanalyzer()")
+    # backtrader's ItemCollection exposes getbyname/getitems/getnames — there
+    # is no getbytype, so this raised AttributeError on every call and
+    # run_backtest() could never complete. The failure was invisible because
+    # backtrader is an optional dependency and the test skipped without it.
+    #
+    # Searching by type rather than by name keeps this working whether the
+    # analyzer was registered with an explicit _name or with backtrader's
+    # auto-generated one.
+    analyzer = _find_result_analyzer(strategy_result.analyzers)
+    if analyzer is None:
+        raise ValueError(
+            "BacktestResultAnalyzer not found. Add it via "
+            "cerebro.addanalyzer(BacktestResultAnalyzer) before cerebro.run()."
+        )
 
-    analysis = analyzer[0].get_analysis()
+    analysis = analyzer.get_analysis()
 
     equity = np.array(analysis["equity_curve"])
     dates = analysis["dates"]
