@@ -360,75 +360,76 @@ class TestStopLossGuarantees:
         assert "TP-001" not in broker_bridge._oco_pairs
         assert "SL-001" not in broker_bridge._oco_pairs
 
+    # These three used to construct a TrailingStop dataclass, re-implement the
+    # ratcheting arithmetic inline in the test body, and assert on their own
+    # result. Every line of trailing-stop logic could be deleted from
+    # broker_bridge.py and all three would still have passed. They now drive
+    # the real BrokerBridge._update_trailing_stops().
+
+    @staticmethod
+    def _bridge_with_position(direction, entry, trail_pct=0.015, activation_pct=0.02):
+        import tempfile
+
+        from shared.daemon.broker_bridge import BrokerBridge, Position
+        from shared.risk_manager_unified import UnifiedPortfolioRiskGate
+
+        UnifiedPortfolioRiskGate.reset_instance()
+        fd, diary = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+        bridge = BrokerBridge(broker="ib", mode="paper", diary_path=diary)
+        shares = 10 if direction == "long" else -10
+        bridge._positions["AAPL"] = Position(
+            "AAPL", direction, abs(shares), entry, "t")
+        bridge.set_trailing_stop(
+            "AAPL", direction,
+            activation_pct=activation_pct, trail_pct=trail_pct)
+        return bridge
+
     def test_trailing_stop_never_moves_against_long(self):
-        """For a long position, trailing stop only ratchets UP."""
-        trail = TrailingStop(
-            symbol="AAPL", direction="long",
-            activation_pct=0.02, trail_pct=0.015,
-            highest_price=100.0, activated=True, stop_price=98.5,
+        """For a long position the stop only ratchets UP."""
+        bridge = self._bridge_with_position("long", entry=100.0)
+
+        bridge._update_trailing_stops("AAPL", 105.0)   # activates and ratchets
+        ts = bridge._trailing_stops["AAPL"]
+        assert ts.activated is True
+        peak_stop = ts.stop_price
+        assert peak_stop == pytest.approx(105.0 * 0.985, rel=1e-4)
+
+        bridge._update_trailing_stops("AAPL", 103.0)   # pullback
+        assert bridge._trailing_stops["AAPL"].stop_price == pytest.approx(peak_stop), (
+            "Trailing stop moved DOWN — money exposed!"
         )
-
-        # Price goes up → stop should ratchet up
-        new_price = 105.0
-        if new_price > trail.highest_price:
-            trail.highest_price = new_price
-            new_stop = new_price * (1 - trail.trail_pct)
-            if new_stop > trail.stop_price:
-                trail.stop_price = new_stop
-
-        assert trail.stop_price == pytest.approx(105.0 * 0.985, rel=1e-4)
-
-        # Price goes down → stop must NOT move down
-        old_stop = trail.stop_price
-        new_price = 103.0
-        if new_price > trail.highest_price:
-            trail.highest_price = new_price
-            new_stop = new_price * (1 - trail.trail_pct)
-            if new_stop > trail.stop_price:
-                trail.stop_price = new_stop
-
-        assert trail.stop_price == old_stop, "Trailing stop moved DOWN — money exposed!"
 
     def test_trailing_stop_never_moves_against_short(self):
-        """For a short position, trailing stop only ratchets DOWN."""
-        trail = TrailingStop(
-            symbol="AAPL", direction="short",
-            activation_pct=0.02, trail_pct=0.015,
-            lowest_price=100.0, activated=True, stop_price=101.5,
+        """For a short position the stop only ratchets DOWN."""
+        bridge = self._bridge_with_position("short", entry=100.0)
+
+        bridge._update_trailing_stops("AAPL", 95.0)
+        ts = bridge._trailing_stops["AAPL"]
+        assert ts.activated is True
+        trough_stop = ts.stop_price
+        assert trough_stop == pytest.approx(95.0 * 1.015, rel=1e-4)
+
+        bridge._update_trailing_stops("AAPL", 97.0)
+        assert bridge._trailing_stops["AAPL"].stop_price == pytest.approx(trough_stop), (
+            "Short trailing stop moved UP — money exposed!"
         )
-
-        # Price drops → stop should ratchet down
-        new_price = 95.0
-        if new_price < trail.lowest_price:
-            trail.lowest_price = new_price
-            new_stop = new_price * (1 + trail.trail_pct)
-            if new_stop < trail.stop_price:
-                trail.stop_price = new_stop
-
-        assert trail.stop_price == pytest.approx(95.0 * 1.015, rel=1e-4)
-
-        # Price goes up → stop must NOT move up
-        old_stop = trail.stop_price
-        new_price = 97.0
-        if new_price < trail.lowest_price:
-            trail.lowest_price = new_price
-            new_stop = new_price * (1 + trail.trail_pct)
-            if new_stop < trail.stop_price:
-                trail.stop_price = new_stop
-
-        assert trail.stop_price == old_stop, "Short trailing stop moved UP — money exposed!"
 
     def test_trailing_stop_triggers_exit(self):
-        """Price reversal beyond trail % triggers position close."""
-        trail = TrailingStop(
-            symbol="AAPL", direction="long",
-            activation_pct=0.02, trail_pct=0.02,
-            highest_price=105.0, activated=True,
-            stop_price=105.0 * 0.98,  # $102.90
+        """A reversal through the stop reports a trigger."""
+        bridge = self._bridge_with_position("long", entry=100.0, trail_pct=0.02)
+
+        assert bridge._update_trailing_stops("AAPL", 105.0) is False
+        assert bridge._update_trailing_stops("AAPL", 102.0) is True, (
+            "Price below the trailing stop but no exit signalled"
         )
-        current_price = 102.0
-        should_exit = current_price <= trail.stop_price
-        assert should_exit is True, "Price below trailing stop but exit not triggered"
+
+    def test_trailing_stop_does_not_activate_before_the_threshold(self):
+        """Below activation_pct profit the stop must stay dormant."""
+        bridge = self._bridge_with_position("long", entry=100.0, activation_pct=0.05)
+
+        assert bridge._update_trailing_stops("AAPL", 101.0) is False
+        assert bridge._trailing_stops["AAPL"].activated is False
 
     def test_all_python_strategy_configs_have_stop_loss(self):
         """Factor, ML, Self-Learning configs all define stop_loss_pct."""
